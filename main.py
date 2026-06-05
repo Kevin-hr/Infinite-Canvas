@@ -29,7 +29,7 @@ from threading import Lock, Thread
 import httpx
 from PIL import Image
 from io import BytesIO
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Header, Request
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response, StreamingResponse, JSONResponse
@@ -1281,7 +1281,19 @@ def versioned_static_html(html: str) -> str:
         return html
     safe_version = urllib.parse.quote(version, safe="._-")
     pattern = re.compile(r'(?P<prefix>(?:src|href)=["\']|@import\s+url\(["\'])(?P<url>/static/[^"\')?#]+(?:\.(?:js|css|html)))(?:\?v=[^"\')#]*)?', re.I)
-    return pattern.sub(lambda m: f"{m.group('prefix')}{m.group('url')}?v={safe_version}", html)
+    def replace(match):
+        url = match.group("url")
+        cache_version = safe_version
+        try:
+            rel = urllib.parse.unquote(url[len("/static/"):]).replace("/", os.sep)
+            path = os.path.abspath(os.path.join(STATIC_DIR, rel))
+            static_root = os.path.abspath(STATIC_DIR)
+            if path.startswith(static_root + os.sep) and os.path.isfile(path):
+                cache_version = f"{safe_version}.{int(os.path.getmtime(path))}"
+        except Exception:
+            pass
+        return f"{match.group('prefix')}{url}?v={cache_version}"
+    return pattern.sub(replace, html)
 
 def sync_static_html_versions():
     version = current_app_version()
@@ -1303,7 +1315,7 @@ def sync_static_html_versions():
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     old = f.read()
-                new = re.sub(r'([?&]v=)[^"\'`\s<>)]*', rf'\g<1>{safe_version}', old)
+                new = versioned_static_html(re.sub(r'([?&]v=)[^"\'`\s<>)]*', rf'\g<1>{safe_version}', old))
                 if new != old:
                     with open(path, "w", encoding="utf-8", newline="") as f:
                         f.write(new)
@@ -2323,6 +2335,15 @@ class CanvasAssetDownloadRequest(BaseModel):
     items: List[Dict[str, Any]] = []
     filename: str = "canvas-output-images.zip"
 
+class CanvasWorkflowExportRequest(BaseModel):
+    nodes: List[Dict[str, Any]] = []
+    connections: List[Dict[str, Any]] = []
+    filename: str = "canvas-workflow.zip"
+    include_resources: bool = True
+    library_id: str = ""
+    category_id: str = ""
+    name: str = ""
+
 class SmartCanvasGroupExportItem(BaseModel):
     kind: str = ""
     url: str = ""
@@ -2337,6 +2358,22 @@ class SmartCanvasGroupExportRequest(BaseModel):
 class LocalImageImportRequest(BaseModel):
     path: str = ""
     paths: List[str] = Field(default_factory=list)
+
+class LocalAssetCaptionRequest(BaseModel):
+    names: List[str] = []
+    provider: str = "comfly"
+    model: str = ""
+    ms_model: str = ""
+    prompt: str = "描述图片"
+
+class LocalAssetCaptionSaveRequest(BaseModel):
+    name: str = ""
+    caption: str = ""
+
+class LocalAssetFolderRequest(BaseModel):
+    parent: str = ""
+    path: str = ""
+    name: str = ""
 
 class AssetLibraryCategoryRequest(BaseModel):
     name: str = "新文件夹"
@@ -2369,6 +2406,7 @@ class SharedFolderImport(BaseModel):
 
 class AssetLibraryRenameRequest(BaseModel):
     name: str = ""
+    library_id: str = ""
 
 class AssetLibraryBatchDeleteRequest(BaseModel):
     ids: List[str] = []
@@ -4058,7 +4096,7 @@ def normalize_asset_library(lib):
         library["id"] = re.sub(r"[^A-Za-z0-9_-]+", "_", str(library.get("id") or f"lib_{uuid.uuid4().hex[:8]}"))[:40]
         library["name"] = sanitize_asset_name(library.get("name") or "资产库", "资产库")
         cats = library.get("categories") if isinstance(library.get("categories"), list) else []
-        if not any(c.get("type") == "workflow" for c in cats):
+        if library.get("id") == "default" and not any(c.get("type") == "workflow" for c in cats):
             cats.append({"id": "workflows", "name": "工作流", "type": "workflow", "items": []})
         for cat in cats:
             for item in (cat.get("items") or []):
@@ -4136,6 +4174,8 @@ def sort_asset_library_items(lib):
 def asset_library_media_kind(path: str, content_type: str = "") -> str:
     ext = os.path.splitext(path or "")[1].lower()
     ct = (content_type or "").lower()
+    if ext in {".json", ".zip"}:
+        return "workflow"
     if ext in {".mp4", ".webm", ".mov", ".m4v", ".mkv"} or ct.startswith("video/"):
         return "video"
     if ext in {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"} or ct.startswith("audio/"):
@@ -4148,8 +4188,9 @@ def asset_library_safe_extension(path: str, kind: str) -> str:
         "image": {".png", ".jpg", ".jpeg", ".webp", ".gif"},
         "video": {".mp4", ".webm", ".mov", ".m4v", ".mkv"},
         "audio": {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"},
+        "workflow": {".json", ".zip"},
     }
-    fallback = {"image": ".png", "video": ".mp4", "audio": ".mp3"}
+    fallback = {"image": ".png", "video": ".mp4", "audio": ".mp3", "workflow": ".zip"}
     return ext if ext in allowed.get(kind, allowed["image"]) else fallback.get(kind, ".png")
 
 def make_asset_library_item(src: str, name: str = "") -> Tuple[str, Dict[str, Any]]:
@@ -4170,6 +4211,51 @@ def make_asset_library_item(src: str, name: str = "") -> Tuple[str, Dict[str, An
     }
     return dest_name, item
     return lib
+
+def asset_library_workflow_category(lib, library_id="", category_id=""):
+    library = find_asset_library(lib, library_id)
+    if not library:
+        raise HTTPException(status_code=404, detail="资产库不存在")
+    categories = library.setdefault("categories", [])
+    cat = None
+    if category_id:
+        cat = next((c for c in categories if c.get("id") == category_id), None)
+        if not cat:
+            raise HTTPException(status_code=404, detail="工作流分类不存在")
+        if cat.get("type") != "workflow":
+            raise HTTPException(status_code=400, detail="目标分组不是工作流分类")
+    if not cat:
+        cat = next((c for c in categories if c.get("type") == "workflow"), None)
+    if not cat:
+        cat = {"id": f"wf_{uuid.uuid4().hex[:12]}", "name": "工作流", "type": "workflow", "items": []}
+        categories.append(cat)
+    lib["active_library_id"] = library.get("id") or lib.get("active_library_id")
+    return library, cat
+
+def make_workflow_library_item_from_bytes(raw: bytes, filename: str, name: str = "") -> Dict[str, Any]:
+    if not raw:
+        raise HTTPException(status_code=400, detail="工作流文件为空")
+    safe_filename = sanitize_export_filename(filename or "canvas-workflow.zip", "canvas-workflow.zip")
+    ext = os.path.splitext(safe_filename)[1].lower()
+    if ext not in {".json", ".zip"}:
+        safe_filename += ".zip"
+        ext = ".zip"
+    dest_name = f"workflow_{uuid.uuid4().hex[:12]}_{safe_filename}"
+    dest_path = os.path.join(ASSET_LIBRARY_DIR, dest_name)
+    os.makedirs(ASSET_LIBRARY_DIR, exist_ok=True)
+    with open(dest_path, "wb") as f:
+        f.write(raw)
+    display_name = sanitize_asset_name(name or os.path.splitext(safe_filename)[0], "工作流")
+    return {
+        "id": f"wf_{uuid.uuid4().hex[:12]}",
+        "name": display_name[:120],
+        "url": f"/assets/library/{dest_name}",
+        "kind": "workflow",
+        "type": "workflow",
+        "format": "zip" if ext == ".zip" else "json",
+        "size": len(raw),
+        "created_at": now_ms(),
+    }
 
 def save_asset_library(lib):
     lib = normalize_asset_library(lib)
@@ -4283,6 +4369,27 @@ def shared_child_abs(folder_abs, rel):
     if common != base:
         raise HTTPException(status_code=400, detail="非法路径")
     return abs_path
+
+def image_path_to_data_url(path, max_size=1024):
+    if max_size:
+        try:
+            with Image.open(path) as img:
+                img.load()
+                if max(img.size) > max_size:
+                    img.thumbnail((max_size, max_size), Image.LANCZOS)
+                if img.mode not in ("RGB", "RGBA"):
+                    img = img.convert("RGB")
+                buf = BytesIO()
+                fmt = "PNG" if img.mode == "RGBA" else "JPEG"
+                img.save(buf, format=fmt, quality=88 if fmt == "JPEG" else None)
+                encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+                mime = "image/png" if fmt == "PNG" else "image/jpeg"
+                return f"data:{mime};base64,{encoded}"
+        except Exception as e:
+            print(f"shared caption image resize failed: {e}")
+    with open(path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode("ascii")
+    return f"data:{content_type_for_path(path)};base64,{encoded}"
 
 def scan_shared_tree(folder_id, folder_abs, rel_prefix="", display="", counter=None):
     """递归扫描共享文件夹，返回 {id,name,path,items,children}。"""
@@ -4402,16 +4509,19 @@ def normalize_prompt_template_categories(*category_lists, include_defaults=True)
         if cat_id in seen:
             return
         seen.add(cat_id)
-        name = "我的" if cat_id == "custom" else sanitize_asset_name(category.get("name") or cat_id, cat_id)
+        # 不再强制把 custom 显示为“我的”，分组名以存储为准，这样内置分组也能被重命名。
+        name = sanitize_asset_name(category.get("name") or cat_id, cat_id)
         normalized.append({"id": cat_id, "name": name})
 
-    if include_defaults:
-        for category in defaultPromptTemplateCategories():
-            add_category(category)
+    # 先采用已存储的分组（保留用户对内置分组的重命名/删除），
+    # 只有在系统库一个分组都没有时才补齐默认内置分组（首次初始化）。
     for categories in category_lists:
         if isinstance(categories, list):
             for category in categories:
                 add_category(category)
+    if include_defaults and not normalized:
+        for category in defaultPromptTemplateCategories():
+            add_category(category)
     return normalized
 
 def normalize_prompt_libraries(data):
@@ -6860,11 +6970,70 @@ def _local_upload_kind_ext(filename, content_type):
 
 def _local_upload_display_name(filename):
     # 文件名形如 up_<hex>_<原始名>；去掉前缀还原展示名
-    m = re.match(r"^up_[0-9a-f]{12}_(.+)$", filename)
-    return m.group(1) if m else filename
+    base = os.path.basename(str(filename or ""))
+    m = re.match(r"^up_[0-9a-f]{12}_(.+)$", base)
+    return m.group(1) if m else base
+
+def _local_upload_rel_path(value):
+    text = str(value or "").replace("\\", "/").strip().lstrip("/")
+    if not text:
+        return ""
+    norm = os.path.normpath(text).replace("\\", "/")
+    if norm in {".", ""}:
+        return ""
+    if norm.startswith("../") or norm == ".." or os.path.isabs(norm):
+        raise HTTPException(status_code=400, detail="非法路径")
+    return norm
+
+def _local_upload_abs(rel):
+    rel_path = _local_upload_rel_path(rel)
+    path = os.path.abspath(os.path.join(LOCAL_UPLOAD_DIR, rel_path))
+    root = os.path.abspath(LOCAL_UPLOAD_DIR)
+    try:
+        common = os.path.commonpath([root, path])
+    except ValueError:
+        raise HTTPException(status_code=400, detail="非法路径")
+    if common != root:
+        raise HTTPException(status_code=400, detail="非法路径")
+    return rel_path, path
+
+def _local_upload_safe_path(name):
+    filename, path = _local_upload_abs(name)
+    if not filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+    return filename, path
+
+def _local_upload_safe_folder(path_value):
+    rel, path = _local_upload_abs(path_value)
+    return rel, path
+
+def _local_upload_safe_folder_name(name):
+    cleaned = sanitize_asset_name(os.path.basename(str(name or "").strip()), "")
+    cleaned = re.sub(r"[\\/]+", "_", cleaned).strip(" ._")
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="文件夹名称不能为空")
+    return cleaned[:60]
+
+def _local_upload_caption_path(filename):
+    return os.path.splitext(os.path.join(LOCAL_UPLOAD_DIR, filename))[0] + ".txt"
+
+def _read_local_upload_caption(filename):
+    caption_path = _local_upload_caption_path(filename)
+    if not os.path.isfile(caption_path):
+        return "", ""
+    try:
+        with open(caption_path, "r", encoding="utf-8-sig") as f:
+            text = f.read()
+    except UnicodeDecodeError:
+        with open(caption_path, "r", encoding="gb18030", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return "", ""
+    return text, os.path.basename(caption_path)
 
 def _local_upload_item(filename):
     path = os.path.join(LOCAL_UPLOAD_DIR, filename)
+    rel = _local_upload_rel_path(filename)
     try:
         stat = os.stat(path)
         size = stat.st_size
@@ -6873,19 +7042,75 @@ def _local_upload_item(filename):
         size = 0
         created_at = 0
     kind, _ = _local_upload_kind_ext(filename, "")
-    return {
-        "id": filename,
-        "file": filename,
-        "name": _local_upload_display_name(filename),
-        "url": f"/assets/uploads/{filename}",
+    item = {
+        "id": rel,
+        "file": rel,
+        "name": _local_upload_display_name(rel),
+        "url": f"/assets/uploads/{urllib.parse.quote(rel, safe='/')}",
         "kind": kind or "image",
         "size": size,
         "created_at": created_at,
+        "folder": os.path.dirname(rel).replace("\\", "/"),
+    }
+    if kind == "image":
+        caption, caption_file = _read_local_upload_caption(filename)
+        item["caption"] = caption
+        item["caption_file"] = caption_file
+    return item
+
+def _local_upload_folder_node(path="", name="全部上传"):
+    rel = _local_upload_rel_path(path)
+    return {
+        "id": rel or "__root__",
+        "path": rel,
+        "name": name if not rel else os.path.basename(rel),
+        "items": [],
+        "children": [],
     }
 
+def _local_upload_tree_and_items():
+    root_node = _local_upload_folder_node("", "全部上传")
+    folder_map = {"": root_node}
+    items = []
+    for current, dirs, files in os.walk(LOCAL_UPLOAD_DIR):
+        dirs[:] = sorted([d for d in dirs if not d.startswith(".") and not d.startswith("._")], key=str.lower)
+        rel_dir = os.path.relpath(current, LOCAL_UPLOAD_DIR).replace("\\", "/")
+        if rel_dir == ".":
+            rel_dir = ""
+        node = folder_map.get(rel_dir)
+        if node is None:
+            node = _local_upload_folder_node(rel_dir)
+            folder_map[rel_dir] = node
+        for dirname in dirs:
+            child_rel = f"{rel_dir}/{dirname}".lstrip("/")
+            child = _local_upload_folder_node(child_rel)
+            folder_map[child_rel] = child
+            node["children"].append(child)
+        for name in sorted(files, key=str.lower):
+            if name.startswith(".") or name.startswith("._"):
+                continue
+            rel_file = f"{rel_dir}/{name}".lstrip("/")
+            kind, _ = _local_upload_kind_ext(name, "")
+            if kind is None:
+                continue
+            item = _local_upload_item(rel_file)
+            node["items"].append(item)
+            items.append(item)
+    def fill_counts(node):
+        total = len(node.get("items") or [])
+        for child in node.get("children") or []:
+            total += fill_counts(child)
+        node["count"] = total
+        return total
+    fill_counts(root_node)
+    items.sort(key=lambda it: it.get("created_at") or 0, reverse=True)
+    return root_node, items
+
 @app.post("/api/local-assets/upload")
-async def upload_local_assets(files: List[UploadFile] = File(...)):
+async def upload_local_assets(files: List[UploadFile] = File(...), folder: str = Form("")):
     uploaded = []
+    folder_rel, folder_abs = _local_upload_safe_folder(folder)
+    os.makedirs(folder_abs, exist_ok=True)
     for file in files:
         content = await file.read()
         if not content:
@@ -6897,27 +7122,50 @@ async def upload_local_assets(files: List[UploadFile] = File(...)):
         base = re.sub(r"[^0-9A-Za-z一-鿿._-]+", "_", base).strip("_") or "file"
         base = base[:60]
         filename = f"up_{uuid.uuid4().hex[:12]}_{base}{ext}"
-        path = os.path.join(LOCAL_UPLOAD_DIR, filename)
+        rel_name = f"{folder_rel}/{filename}".lstrip("/")
+        path = os.path.join(folder_abs, filename)
         with open(path, "wb") as f:
             f.write(content)
-        uploaded.append(_local_upload_item(filename))
+        uploaded.append(_local_upload_item(rel_name))
     return {"files": uploaded}
 
 @app.get("/api/local-assets")
 async def list_local_assets():
-    try:
-        names = os.listdir(LOCAL_UPLOAD_DIR)
-    except OSError:
-        names = []
-    items = []
-    for name in names:
-        if name.startswith("."):
-            continue
-        if not os.path.isfile(os.path.join(LOCAL_UPLOAD_DIR, name)):
-            continue
-        items.append(_local_upload_item(name))
-    items.sort(key=lambda it: it.get("created_at") or 0, reverse=True)
-    return {"items": items}
+    tree, items = _local_upload_tree_and_items()
+    return {"items": items, "tree": tree}
+
+@app.post("/api/local-assets/folders")
+async def create_local_asset_folder(payload: LocalAssetFolderRequest, request: Request):
+    ensure_same_origin_request(request)
+    parent_rel, parent_abs = _local_upload_safe_folder(payload.parent)
+    if not os.path.isdir(parent_abs):
+        raise HTTPException(status_code=404, detail="父文件夹不存在")
+    name = _local_upload_safe_folder_name(payload.name)
+    rel = f"{parent_rel}/{name}".lstrip("/")
+    _, abs_path = _local_upload_safe_folder(rel)
+    if os.path.exists(abs_path):
+        raise HTTPException(status_code=400, detail="同名文件夹已存在")
+    os.makedirs(abs_path, exist_ok=False)
+    tree, items = _local_upload_tree_and_items()
+    return {"ok": True, "folder": {"path": rel, "name": name}, "tree": tree, "items": items}
+
+@app.patch("/api/local-assets/folders")
+async def rename_local_asset_folder(payload: LocalAssetFolderRequest, request: Request):
+    ensure_same_origin_request(request)
+    rel, abs_path = _local_upload_safe_folder(payload.path)
+    if not rel:
+        raise HTTPException(status_code=400, detail="根目录不能重命名")
+    if not os.path.isdir(abs_path):
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+    name = _local_upload_safe_folder_name(payload.name)
+    parent = os.path.dirname(rel).replace("\\", "/")
+    new_rel = f"{parent}/{name}".lstrip("/")
+    _, new_abs = _local_upload_safe_folder(new_rel)
+    if os.path.exists(new_abs):
+        raise HTTPException(status_code=400, detail="同名文件夹已存在")
+    os.rename(abs_path, new_abs)
+    tree, items = _local_upload_tree_and_items()
+    return {"ok": True, "folder": {"path": new_rel, "name": name}, "tree": tree, "items": items}
 
 @app.post("/api/local-assets/delete")
 async def delete_local_assets(payload: dict, request: Request):
@@ -6927,17 +7175,73 @@ async def delete_local_assets(payload: dict, request: Request):
         names = []
     deleted = []
     for name in names:
-        name = os.path.basename(str(name or "").strip())
-        if not name:
+        try:
+            rel, path = _local_upload_safe_path(name)
+        except HTTPException:
             continue
-        path = os.path.join(LOCAL_UPLOAD_DIR, name)
         if os.path.isfile(path):
             try:
                 os.remove(path)
-                deleted.append(name)
+                txt_path = _local_upload_caption_path(rel)
+                if os.path.isfile(txt_path):
+                    os.remove(txt_path)
+                deleted.append(rel)
             except OSError:
                 pass
     return {"deleted": deleted}
+
+@app.post("/api/local-assets/caption")
+async def caption_local_assets(payload: LocalAssetCaptionRequest):
+    prompt = (payload.prompt or "描述图片").strip() or "描述图片"
+    items = []
+    ok_count = 0
+    for name in (payload.names or [])[:100]:
+        item = {"name": name, "ok": False, "caption": "", "caption_file": "", "error": ""}
+        try:
+            filename, path = _local_upload_safe_path(name)
+            if not os.path.isfile(path):
+                raise HTTPException(status_code=404, detail="文件不存在")
+            kind, _ = _local_upload_kind_ext(filename, "")
+            if kind != "image":
+                raise HTTPException(status_code=400, detail="仅支持图片素材反推提示词")
+            caption, resolved_model = await caption_image_with_provider(
+                path,
+                prompt,
+                payload.provider,
+                payload.model,
+                payload.ms_model,
+            )
+            txt_path = _local_upload_caption_path(filename)
+            with open(txt_path, "w", encoding="utf-8", newline="") as f:
+                f.write(caption)
+            item.update({
+                "ok": True,
+                "name": filename,
+                "caption": caption,
+                "caption_file": os.path.basename(txt_path),
+                "model": resolved_model,
+            })
+            ok_count += 1
+        except HTTPException as exc:
+            item["error"] = str(exc.detail or "反推失败")
+        except Exception as exc:
+            item["error"] = str(exc) or "反推失败"
+        items.append(item)
+    return {"ok": True, "count": ok_count, "items": items}
+
+@app.patch("/api/local-assets/caption")
+async def save_local_asset_caption(payload: LocalAssetCaptionSaveRequest):
+    filename, path = _local_upload_safe_path(payload.name)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    kind, _ = _local_upload_kind_ext(filename, "")
+    if kind != "image":
+        raise HTTPException(status_code=400, detail="仅支持图片素材保存提示词")
+    caption = str(payload.caption or "")[:100000]
+    txt_path = _local_upload_caption_path(filename)
+    with open(txt_path, "w", encoding="utf-8", newline="") as f:
+        f.write(caption)
+    return {"ok": True, "caption": caption, "caption_file": os.path.basename(txt_path)}
 
 @app.post("/api/temp-sh/upload")
 async def temp_sh_upload(payload: TempShUploadRequest, request: Request):
@@ -8639,9 +8943,13 @@ async def canvas_video(payload: CanvasVideoRequest):
                             "type": "image_url",
                             "image_url": {"url": url},
                         }
-                        role = volcengine_content_role(ref.role, "image")
-                        if role:
-                            item["role"] = role
+                        # 火山视频接口要求每个 image 内容项都必须带 role。
+                        # volcengine_content_role 对“空 role + image”会返回 None（这是为纯生图
+                        # 路径准备的，避免被火山误判为 r2v）；但在视频生成场景里，图片本就是参考帧，
+                        # 缺省 role 必须回退为 reference_image，否则 mac 等未显式指定首/尾帧 role 的
+                        # 请求会报 "role must be specified for image contents"。
+                        role = volcengine_content_role(ref.role, "image") or "reference_image"
+                        item["role"] = role
                         body["content"].append(item)
                         image_like_urls.add(url)
                     for url in (payload.videos or [])[:3]:
@@ -9084,6 +9392,196 @@ def sanitize_export_filename(name: str, fallback: str) -> str:
     base = re.sub(r'[\\/:*?"<>|]+', "_", base)
     return base or fallback
 
+def canvas_workflow_collect_resource_refs(value, found=None):
+    if found is None:
+        found = []
+    if isinstance(value, dict):
+        for item in value.values():
+            canvas_workflow_collect_resource_refs(item, found)
+    elif isinstance(value, list):
+        for item in value:
+            canvas_workflow_collect_resource_refs(item, found)
+    elif isinstance(value, str):
+        text = value.strip()
+        if (text.startswith("/assets/") or text.startswith("/output/")) and output_file_from_url(text):
+            found.append(text)
+    return found
+
+def canvas_workflow_unique_archive_name(base, used):
+    safe = sanitize_export_filename(base, "resource.bin")
+    name, ext = os.path.splitext(safe)
+    archive = safe
+    idx = 2
+    while archive in used:
+        archive = f"{name}-{idx}{ext}"
+        idx += 1
+    used.add(archive)
+    return archive
+
+def canvas_workflow_replace_strings(value, mapping):
+    if isinstance(value, dict):
+        return {k: canvas_workflow_replace_strings(v, mapping) for k, v in value.items()}
+    if isinstance(value, list):
+        return [canvas_workflow_replace_strings(item, mapping) for item in value]
+    if isinstance(value, str):
+        return mapping.get(value, value)
+    return value
+
+def canvas_workflow_payload(nodes, connections, resources=None):
+    return {
+        "format": "infinite-canvas-workflow",
+        "version": 1,
+        "exported_at": now_ms(),
+        "nodes": nodes or [],
+        "connections": connections or [],
+        "resources": resources or [],
+    }
+
+def build_canvas_workflow_archive(payload: CanvasWorkflowExportRequest) -> Tuple[bytes, Dict[str, Any]]:
+    nodes_payload = payload.nodes or []
+    connections_payload = payload.connections or []
+    if not nodes_payload:
+        raise HTTPException(status_code=400, detail="没有可导出的节点")
+    buffer = BytesIO()
+    resources = []
+    used = set()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        if payload.include_resources:
+            for url in canvas_workflow_collect_resource_refs(nodes_payload):
+                if any(item.get("url") == url for item in resources):
+                    continue
+                path = output_file_from_url(url)
+                if not path or not os.path.isfile(path):
+                    continue
+                archive_name = canvas_workflow_unique_archive_name(os.path.basename(path), used)
+                archive_path = f"resources/{archive_name}"
+                zf.write(path, archive_path)
+                resources.append({
+                    "url": url,
+                    "archive": archive_path,
+                    "name": os.path.basename(path),
+                    "size": os.path.getsize(path),
+                })
+        workflow = canvas_workflow_payload(nodes_payload, connections_payload, resources)
+        zf.writestr("workflow.json", json.dumps(workflow, ensure_ascii=False, indent=2))
+    buffer.seek(0)
+    return buffer.getvalue(), {"resources": resources, "node_count": len(nodes_payload), "connection_count": len(connections_payload)}
+
+@app.post("/api/canvas-workflows/export")
+async def export_canvas_workflow(payload: CanvasWorkflowExportRequest):
+    archive, _ = build_canvas_workflow_archive(payload)
+    filename = sanitize_export_filename(payload.filename or "canvas-workflow.zip", "canvas-workflow.zip")
+    if not filename.lower().endswith(".zip"):
+        filename += ".zip"
+    encoded = urllib.parse.quote(filename)
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"}
+    return Response(archive, media_type="application/zip", headers=headers)
+
+@app.post("/api/canvas-workflows/export-to-library")
+async def export_canvas_workflow_to_library(payload: CanvasWorkflowExportRequest):
+    archive, meta = build_canvas_workflow_archive(payload)
+    filename = sanitize_export_filename(payload.filename or "canvas-workflow.zip", "canvas-workflow.zip")
+    if not filename.lower().endswith(".zip"):
+        filename += ".zip"
+    lib = load_asset_library()
+    _, cat = asset_library_workflow_category(lib, payload.library_id, payload.category_id)
+    item = make_workflow_library_item_from_bytes(archive, filename, payload.name or os.path.splitext(filename)[0])
+    item["node_count"] = meta.get("node_count") or len(payload.nodes or [])
+    item["connection_count"] = meta.get("connection_count") or len(payload.connections or [])
+    item["resource_count"] = len(meta.get("resources") or [])
+    cat.setdefault("items", []).append(item)
+    save_asset_library(lib)
+    return {"library": lib, "item": item}
+
+@app.post("/api/asset-library/workflows/upload")
+async def upload_asset_library_workflows(
+    files: List[UploadFile] = File(...),
+    library_id: str = Form(""),
+    category_id: str = Form(""),
+):
+    lib = load_asset_library()
+    _, cat = asset_library_workflow_category(lib, library_id, category_id)
+    added = []
+    for file in files[:100]:
+        raw = await file.read()
+        filename = file.filename or "canvas-workflow.zip"
+        lower = filename.lower()
+        if not (lower.endswith(".json") or lower.endswith(".zip") or raw[:2] == b"PK"):
+            continue
+        item = make_workflow_library_item_from_bytes(raw, filename, os.path.splitext(filename)[0])
+        cat.setdefault("items", []).append(item)
+        added.append(item)
+    if not added:
+        raise HTTPException(status_code=400, detail="没有可上传的工作流文件")
+    save_asset_library(lib)
+    return {"library": lib, "items": added}
+
+@app.post("/api/canvas-workflows/import")
+async def import_canvas_workflow(file: UploadFile = File(...)):
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="文件为空")
+    name = str(file.filename or "").lower()
+    resource_mapping = {}
+    workflow = None
+    try:
+        if name.endswith(".zip") or raw[:2] == b"PK":
+            with zipfile.ZipFile(BytesIO(raw), "r") as zf:
+                candidates = [n for n in zf.namelist() if n.lower().endswith("workflow.json")]
+                workflow_name = "workflow.json" if "workflow.json" in zf.namelist() else (candidates[0] if candidates else "")
+                if not workflow_name:
+                    raise HTTPException(status_code=400, detail="压缩包中没有 workflow.json")
+                workflow = json.loads(zf.read(workflow_name).decode("utf-8-sig"))
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                import_dir = os.path.join(OUTPUT_INPUT_DIR, f"workflow_import_{stamp}_{uuid.uuid4().hex[:6]}")
+                os.makedirs(import_dir, exist_ok=True)
+                for res in workflow.get("resources") or []:
+                    archive = str(res.get("archive") or "").replace("\\", "/").lstrip("/")
+                    if not archive or archive not in zf.namelist():
+                        continue
+                    base = sanitize_export_filename(res.get("name") or os.path.basename(archive), os.path.basename(archive) or "resource.bin")
+                    target = os.path.join(import_dir, f"{uuid.uuid4().hex[:8]}_{base}")
+                    with zf.open(archive) as src, open(target, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    rel = os.path.relpath(target, ASSETS_DIR).replace("\\", "/")
+                    new_url = f"/assets/{rel}"
+                    old_url = str(res.get("url") or "").strip()
+                    if old_url:
+                        resource_mapping[old_url] = new_url
+                    resource_mapping[archive] = new_url
+                    resource_mapping[f"./{archive}"] = new_url
+                    resource_mapping[os.path.basename(archive)] = new_url
+        else:
+            workflow = json.loads(raw.decode("utf-8-sig"))
+    except HTTPException:
+        raise
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(status_code=400, detail="无法读取压缩包") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"无法解析工作流文件：{exc}") from exc
+    if isinstance(workflow, list):
+        workflow = {"nodes": workflow, "connections": []}
+    if not isinstance(workflow, dict):
+        raise HTTPException(status_code=400, detail="工作流格式不正确")
+    nodes_payload = workflow.get("nodes")
+    connections_payload = workflow.get("connections")
+    if nodes_payload is None and isinstance(workflow.get("workflow"), dict):
+        nodes_payload = workflow["workflow"].get("nodes")
+        connections_payload = workflow["workflow"].get("connections")
+    if not isinstance(nodes_payload, list):
+        raise HTTPException(status_code=400, detail="工作流 JSON 缺少 nodes")
+    if not isinstance(connections_payload, list):
+        connections_payload = []
+    if resource_mapping:
+        nodes_payload = canvas_workflow_replace_strings(nodes_payload, resource_mapping)
+        connections_payload = canvas_workflow_replace_strings(connections_payload, resource_mapping)
+    return {
+        "workflow": canvas_workflow_payload(nodes_payload, connections_payload, workflow.get("resources") or []),
+        "nodes": nodes_payload,
+        "connections": connections_payload,
+        "resource_map": resource_mapping,
+    }
+
 def smart_group_export_folder(folder: str, group_name: str) -> str:
     text = str(folder or "").strip()
     if text:
@@ -9292,8 +9790,8 @@ async def add_prompt_library_category(payload: PromptLibraryCategoryRequest):
 
 @app.patch("/api/prompt-libraries/categories/{category_id}")
 async def rename_prompt_library_category(category_id: str, payload: PromptLibraryCategoryRequest):
-    if category_id in PROMPT_BUILTIN_CATEGORY_IDS:
-        raise HTTPException(status_code=400, detail="内置分组不能重命名")
+    # 系统库（内置）分组也允许重命名：分组的 id 不变，只改显示名，
+    # 这样画布与素材库管理共用同一份分组数据，重命名两端实时同步。
     name = sanitize_asset_name(payload.name, "")
     if not name:
         raise HTTPException(status_code=400, detail="分组名称不能为空")
@@ -9311,8 +9809,7 @@ async def rename_prompt_library_category(category_id: str, payload: PromptLibrar
 
 @app.delete("/api/prompt-libraries/categories/{category_id}")
 async def delete_prompt_library_category(category_id: str):
-    if category_id in PROMPT_BUILTIN_CATEGORY_IDS:
-        raise HTTPException(status_code=400, detail="内置分组不能删除")
+    # 系统库（内置）分组也允许删除，与素材库管理/画布保持一致。
     data = load_prompt_libraries()
     found = False
     for library in data.get("libraries", []) or []:
@@ -9321,9 +9818,11 @@ async def delete_prompt_library_category(category_id: str):
         if len(kept) != len(cats):
             found = True
             library["categories"] = kept
-        for item in library.get("items", []) or []:
-            if isinstance(item, dict) and item.get("category") == category_id:
-                item["category"] = "custom"
+            # 被删分组下的条目改挂到剩余的第一个分组；若已无分组则归到“未分类”。
+            fallback = next((str(c.get("id")) for c in kept if isinstance(c, dict) and c.get("id")), "")
+            for item in library.get("items", []) or []:
+                if isinstance(item, dict) and item.get("category") == category_id:
+                    item["category"] = fallback
     if not found:
         raise HTTPException(status_code=404, detail="分组不存在")
     data = save_prompt_libraries(data)
@@ -9380,7 +9879,7 @@ async def create_asset_library_category(payload: AssetLibraryCategoryRequest):
 @app.patch("/api/asset-library/categories/{category_id}")
 async def rename_asset_library_category(category_id: str, payload: AssetLibraryRenameRequest):
     lib = load_asset_library()
-    _, cat = find_asset_category_with_library(lib, category_id)
+    _, cat = find_asset_category_with_library(lib, category_id, payload.library_id)
     if not cat:
         raise HTTPException(status_code=404, detail="分类不存在")
     cat["name"] = sanitize_asset_name(payload.name, cat.get("name") or "新文件夹")
@@ -9388,12 +9887,12 @@ async def rename_asset_library_category(category_id: str, payload: AssetLibraryR
     return {"library": lib, "category": cat}
 
 @app.delete("/api/asset-library/categories/{category_id}")
-async def delete_asset_library_category(category_id: str):
+async def delete_asset_library_category(category_id: str, library_id: str = ""):
     lib = load_asset_library()
-    library, cat = find_asset_category_with_library(lib, category_id)
+    library, cat = find_asset_category_with_library(lib, category_id, library_id)
     if not cat:
         raise HTTPException(status_code=404, detail="分类不存在")
-    if cat.get("type") == "workflow" and category_id == "workflows":
+    if cat.get("type") == "workflow" and category_id == "workflows" and (library.get("id") or "") == "default":
         raise HTTPException(status_code=400, detail="默认工作流分类不能删除")
     library["categories"] = [c for c in library.get("categories", []) if c.get("id") != category_id]
     save_asset_library(lib)
@@ -9422,6 +9921,8 @@ async def batch_add_asset_library_items(payload: AssetLibraryBatchAddRequest):
     cat = find_asset_category_in_library(lib, payload.category_id, payload.library_id)
     if not cat:
         raise HTTPException(status_code=404, detail="分类不存在")
+    if cat.get("type") != "image":
+        raise HTTPException(status_code=400, detail="该分类暂不支持添加媒体")
     for entry in (payload.items or [])[:200]:
         entry.category_id = payload.category_id
         entry.library_id = payload.library_id
@@ -9532,6 +10033,45 @@ async def import_shared_folder_files(payload: SharedFolderImport):
         added.append(item)
     save_asset_library(lib)
     return {"library": lib, "items": added}
+
+async def caption_image_with_provider(abs_path, prompt, provider_id, model, ms_model=""):
+    chat_base, chat_hdrs, resolved_model = resolve_chat_provider(provider_id, model, ms_model)
+    llm_provider = get_api_provider(provider_id) if provider_id not in ("modelscope",) else {}
+    is_apimart = is_apimart_provider(llm_provider)
+    prompt_text = (prompt or "描述图片").strip() or "描述图片"
+    data_url = image_path_to_data_url(abs_path, max_size=1024)
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt_text},
+            {"type": "image_url", "image_url": {"url": data_url}},
+        ],
+    }]
+    raw = None
+    try:
+        async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
+            req_body = {"model": resolved_model, "messages": messages}
+            if is_apimart:
+                req_body["stream"] = False
+            response = await client.post(
+                f"{chat_base}/chat/completions",
+                headers=chat_hdrs,
+                json=req_body,
+            )
+            response.raise_for_status()
+            raw = response.json()
+    except httpx.HTTPStatusError as exc:
+        body = exc.response.text or ""
+        friendly = friendly_chat_error_detail(body, resolved_model, llm_provider)
+        raise HTTPException(status_code=exc.response.status_code, detail=friendly or f"上游接口错误：{body}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"请求上游接口失败：{exc}") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"解析上游响应失败：{exc}") from exc
+    text = text_from_chat_response(raw).strip() if isinstance(raw, dict) else ""
+    return text or "接口返回了空回复。", resolved_model
 
 @app.patch("/api/asset-library/items/{item_id}")
 async def rename_asset_library_item(item_id: str, payload: AssetLibraryRenameRequest):
@@ -9690,13 +10230,14 @@ async def batch_move_asset_library_items(payload: AssetLibraryBatchMoveRequest):
     target_cat = find_asset_category_in_library(lib, payload.target_category_id, payload.target_library_id)
     if not target_cat:
         raise HTTPException(status_code=404, detail="目标分组不存在")
-    if target_cat.get("type") != "image":
-        raise HTTPException(status_code=400, detail="目标分组不支持媒体")
+    target_type = target_cat.get("type") or "image"
     moved = []
     for library in lib.get("libraries", []):
         if payload.library_id and library.get("id") != payload.library_id:
             continue
         for cat in library.get("categories", []):
+            if (cat.get("type") or "image") != target_type:
+                continue
             keep = []
             for item in cat.get("items", []):
                 if item.get("id") in ids:

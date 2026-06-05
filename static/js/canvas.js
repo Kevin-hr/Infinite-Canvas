@@ -116,6 +116,14 @@ const canvasAssetAddCategoryBtn = document.getElementById('canvasAssetAddCategor
 const canvasAssetDropZone = document.getElementById('canvasAssetDropZone');
 const canvasAssetGrid = document.getElementById('canvasAssetGrid');
 const canvasAssetHoverPreview = document.getElementById('canvasAssetHoverPreview');
+const workflowTransferToggle = document.getElementById('workflowTransferToggle');
+const canvasLogToggle = document.getElementById('canvasLogToggle');
+const workflowTransferModal = document.getElementById('workflowTransferModal');
+const workflowTransferSub = document.getElementById('workflowTransferSub');
+const workflowExportMeta = document.getElementById('workflowExportMeta');
+const workflowImportInput = document.getElementById('workflowImportInput');
+const workflowImportDropZone = document.getElementById('workflowImportDropZone');
+const workflowExportLibraryBtn = document.getElementById('workflowExportLibraryBtn');
 const assetManagerModal = document.getElementById('assetManagerModal');
 const assetManagerBody = document.getElementById('assetManagerBody');
 function revealCanvasAssetControls(){
@@ -163,6 +171,7 @@ let trashMode = false;
 let pendingDeleteCanvasId = null;
 let pendingPurgeCanvasId = null;
 let emojiPickerCanvasId = null;
+let canvasMetaAnchorId = '';
 let canvasSortMode = (() => { try { return localStorage.getItem('canvasSortMode') || 'recent'; } catch(e){ return 'recent'; } })();
 const CANVAS_COLOR_OPTIONS = ['red','orange','amber','green','teal','blue','violet','pink','slate'];
 let localCanvasDirty = false;
@@ -227,7 +236,9 @@ let activeCanvasAssetLibraryId = '';
 let activeCanvasAssetCategoryId = '';
 let assetManagerTab = 'assets';
 let managerSelectedAssetIds = new Set();
+let managerSelectedWorkflowIds = new Set();
 let managerSelectedPromptIds = new Set();
+let activeCanvasWorkflowCategoryId = '';
 const activeCanvasTaskPolls = new Set();
 let hoveredConnectionId = '';
 let lastMouseBoard = {x: 0, y: 0};
@@ -1148,7 +1159,7 @@ async function setTrashMode(active){
     creatingCanvas = false;
     pendingDeleteCanvasId = null;
     pendingPurgeCanvasId = null;
-    emojiPickerCanvasId = null;
+    closeCanvasMetaPopover();
     canvasGate.classList.toggle('creating', false);
     refreshGateViewControls();
     if(trashMode) await loadTrashList();
@@ -1205,7 +1216,7 @@ function togglePinCanvas(id, event){
     event?.preventDefault();
     event?.stopPropagation();
     const item = canvases.find(c => c.id === id);
-    emojiPickerCanvasId = null;
+    closeCanvasMetaPopover();
     patchCanvasMeta(id, {pinned: !(item && item.pinned)});
 }
 function setCanvasColorValue(id, color, event){
@@ -1262,14 +1273,14 @@ function renderCanvasListInto(list){
         const owner = String(item.owner || '').trim();
         const pinned = !!item.pinned && !trashMode;
         row.className = `canvas-item ${isSmartCanvas ? 'smart-canvas' : ''} ${canvas?.id === item.id ? 'active' : ''} ${pinned ? 'pinned' : ''} ${color ? 'has-color' : ''}`;
+        row.dataset.canvasId = item.id;
         const ownerChip = owner
             ? `<span class="canvas-owner-chip" role="button" tabindex="0" title="${escapeAttr(owner)}"><i data-lucide="user-round" class="w-3 h-3"></i><span class="canvas-owner-text">${escapeHtml(owner)}</span></span>`
             : '';
         row.innerHTML = `
-            ${color ? `<span class="canvas-color-bar cc-${escapeAttr(color)}"></span>` : ''}
             <div class="canvas-open" role="button" tabindex="${trashMode ? '-1' : '0'}">
                 <div class="canvas-card-icon-row">
-                    <span class="canvas-preview-mark" role="button" tabindex="0" title="${trashMode ? tr('canvas.deletedCanvas') : (tr('canvas.editMeta') || '编辑图标 / 颜色 / 负责人')}">${renderCanvasIcon(isSmartCanvas && /[^\x00-\x7F]/.test(item.icon || '') ? 'sparkles' : item.icon, 16)}</span>
+                    <span class="canvas-preview-mark ${color ? `icon-has-color cc-${escapeAttr(color)}` : ''}" role="button" tabindex="0" title="${trashMode ? tr('canvas.deletedCanvas') : (tr('canvas.editMeta') || '编辑图标 / 颜色 / 负责人')}">${renderCanvasIcon(isSmartCanvas && /[^\x00-\x7F]/.test(item.icon || '') ? 'sparkles' : item.icon, 16)}</span>
                     ${isSmartCanvas ? `<span class="canvas-kind-chip">${tr('canvas.smartCanvasShort')}</span>` : ''}
                 </div>
                 <div class="canvas-card-title">${escapeHtml(item.title)}</div>
@@ -1317,27 +1328,6 @@ function renderCanvasListInto(list){
                     <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
                 </button>
             `)}
-            ${!trashMode && emojiPickerCanvasId === item.id ? `
-                <div class="canvas-meta-pop">
-                    <div class="canvas-meta-section">
-                        <div class="canvas-meta-label">${tr('canvas.ownerLabel') || '负责人 / 项目'}</div>
-                        <input class="canvas-owner-input" type="text" maxlength="40" value="${escapeAttr(owner)}" placeholder="${escapeAttr(tr('canvas.ownerPlaceholder') || '如：张三 / 双十一项目')}">
-                    </div>
-                    <div class="canvas-meta-section">
-                        <div class="canvas-meta-label">${tr('canvas.colorLabel') || '颜色标记'}</div>
-                        <div class="canvas-color-row">
-                            <button class="canvas-color-swatch cc-none ${!color ? 'active' : ''}" type="button" data-color="" title="${tr('canvas.colorNone') || '无'}"><i data-lucide="ban" class="w-3 h-3"></i></button>
-                            ${CANVAS_COLOR_OPTIONS.map(c => `<button class="canvas-color-swatch cc-${c} ${color === c ? 'active' : ''}" type="button" data-color="${c}" aria-label="${c}"></button>`).join('')}
-                        </div>
-                    </div>
-                    <div class="canvas-meta-section">
-                        <div class="canvas-meta-label">${tr('canvas.changeIcon')}</div>
-                        <div class="emoji-picker-grid">
-                            ${CANVAS_EMOJIS.map(icon => `<button class="emoji-option" type="button" data-icon="${escapeHtml(icon)}">${renderCanvasIcon(icon, 14)}</button>`).join('')}
-                        </div>
-                    </div>
-                </div>
-            ` : ''}
         `;
         if(!trashMode) row.querySelector('.canvas-open').onclick = () => openCanvas(item.id);
         const titleEl = row.querySelector('.canvas-card-title');
@@ -1366,21 +1356,6 @@ function renderCanvasListInto(list){
             ownerChipEl.onmousedown = e => e.stopPropagation();
             ownerChipEl.onclick = e => { e.stopPropagation(); toggleEmojiPicker(item.id, e); };
         }
-        row.querySelectorAll('.canvas-color-swatch').forEach(btn => {
-            btn.onmousedown = e => e.stopPropagation();
-            btn.onclick = e => setCanvasColorValue(item.id, btn.dataset.color || '', e);
-        });
-        const ownerInput = row.querySelector('.canvas-owner-input');
-        if(ownerInput){
-            ownerInput.onmousedown = e => e.stopPropagation();
-            ownerInput.onclick = e => e.stopPropagation();
-            ownerInput.onkeydown = e => {
-                e.stopPropagation();
-                if(e.key === 'Enter'){ e.preventDefault(); ownerInput.blur(); }
-                if(e.key === 'Escape'){ e.preventDefault(); emojiPickerCanvasId = null; renderCanvasList(); }
-            };
-            ownerInput.onblur = () => commitCanvasOwner(item.id, ownerInput.value);
-        }
         const deleteBtn = row.querySelector('.canvas-delete');
         if(deleteBtn) deleteBtn.onclick = e => requestDeleteCanvas(item.id, e);
         const confirmBtn = row.querySelector('.canvas-confirm-btn');
@@ -1394,6 +1369,81 @@ function renderCanvasListInto(list){
         list.appendChild(row);
     });
     refreshIcons();
+    renderCanvasMetaPopover();
+}
+function closeCanvasMetaPopover(){
+    emojiPickerCanvasId = null;
+    canvasMetaAnchorId = '';
+    document.querySelector('.canvas-meta-pop')?.remove();
+}
+function renderCanvasMetaPopover(){
+    document.querySelector('.canvas-meta-pop')?.remove();
+    if(trashMode || !emojiPickerCanvasId) return;
+    const item = canvases.find(entry => entry.id === emojiPickerCanvasId);
+    if(!item) return;
+    const color = String(item.color || '').trim();
+    const owner = String(item.owner || '').trim();
+    const pop = document.createElement('div');
+    pop.className = 'canvas-meta-pop';
+    pop.dataset.canvasMetaPop = item.id;
+    pop.innerHTML = `
+        <div class="canvas-meta-section">
+            <div class="canvas-meta-label">${tr('canvas.ownerLabel') || '负责人 / 项目'}</div>
+            <input class="canvas-owner-input" type="text" maxlength="40" value="${escapeAttr(owner)}" placeholder="${escapeAttr(tr('canvas.ownerPlaceholder') || '如：张三 / 双十一项目')}">
+        </div>
+        <div class="canvas-meta-section">
+            <div class="canvas-meta-label">${tr('canvas.colorLabel') || '颜色标记'}</div>
+            <div class="canvas-color-row">
+                <button class="canvas-color-swatch cc-none ${!color ? 'active' : ''}" type="button" data-color="" title="${tr('canvas.colorNone') || '无'}"><i data-lucide="ban" class="w-3 h-3"></i></button>
+                ${CANVAS_COLOR_OPTIONS.map(c => `<button class="canvas-color-swatch cc-${c} ${color === c ? 'active' : ''}" type="button" data-color="${c}" aria-label="${c}"></button>`).join('')}
+            </div>
+        </div>
+        <div class="canvas-meta-section">
+            <div class="canvas-meta-label">${tr('canvas.changeIcon')}</div>
+            <div class="emoji-picker-grid">
+                ${CANVAS_EMOJIS.map(icon => `<button class="emoji-option" type="button" data-icon="${escapeHtml(icon)}">${renderCanvasIcon(icon, 14)}</button>`).join('')}
+            </div>
+        </div>
+    `;
+    document.body.appendChild(pop);
+    pop.querySelectorAll('.emoji-option').forEach(btn => {
+        btn.onclick = e => setCanvasIcon(item.id, btn.dataset.icon, e);
+    });
+    pop.querySelectorAll('.canvas-color-swatch').forEach(btn => {
+        btn.onmousedown = e => e.stopPropagation();
+        btn.onclick = e => setCanvasColorValue(item.id, btn.dataset.color || '', e);
+    });
+    const ownerInput = pop.querySelector('.canvas-owner-input');
+    if(ownerInput){
+        ownerInput.onmousedown = e => e.stopPropagation();
+        ownerInput.onclick = e => e.stopPropagation();
+        ownerInput.onkeydown = e => {
+            e.stopPropagation();
+            if(e.key === 'Enter'){ e.preventDefault(); ownerInput.blur(); }
+            if(e.key === 'Escape'){ e.preventDefault(); closeCanvasMetaPopover(); renderCanvasList(); }
+        };
+        ownerInput.onblur = () => commitCanvasOwner(item.id, ownerInput.value);
+    }
+    refreshIcons();
+    requestAnimationFrame(positionCanvasMetaPopover);
+}
+function positionCanvasMetaPopover(){
+    if(!emojiPickerCanvasId) return;
+    const pop = document.querySelector('.canvas-meta-pop');
+    const anchorId = canvasMetaAnchorId || emojiPickerCanvasId;
+    const row = document.querySelector(`.canvas-item[data-canvas-id="${CSS.escape(anchorId)}"]`);
+    const icon = row?.querySelector('.canvas-preview-mark') || row?.querySelector('.canvas-owner-chip');
+    if(!pop || !icon) return;
+    const iconRect = icon.getBoundingClientRect();
+    const width = pop.offsetWidth || 212;
+    const height = pop.offsetHeight || 260;
+    const margin = 12;
+    let left = Math.min(Math.max(iconRect.left, margin), window.innerWidth - width - margin);
+    let top = iconRect.bottom + 8;
+    if(top + height > window.innerHeight - margin) top = iconRect.top - height - 8;
+    if(top < margin) top = margin;
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
 }
 async function createCanvas(){
     const customTitle = gateTitleInput?.value.trim();
@@ -1449,7 +1499,9 @@ function toggleEmojiPicker(id, event){
     event?.preventDefault();
     event?.stopPropagation();
     pendingDeleteCanvasId = null;
-    emojiPickerCanvasId = emojiPickerCanvasId === id ? null : id;
+    const opening = emojiPickerCanvasId !== id;
+    emojiPickerCanvasId = opening ? id : null;
+    canvasMetaAnchorId = opening ? id : '';
     renderCanvasList();
 }
 async function setCanvasIcon(id, icon, event){
@@ -1457,7 +1509,7 @@ async function setCanvasIcon(id, icon, event){
     event?.stopPropagation();
     const item = canvases.find(c => c.id === id);
     if(item) item.icon = icon || 'layers';
-    emojiPickerCanvasId = null;
+    closeCanvasMetaPopover();
     renderCanvasList();
     try {
         let target = canvas?.id === id ? canvas : null;
@@ -1744,7 +1796,7 @@ async function returnToCanvasManager(){
 function requestDeleteCanvas(id, event){
     event?.preventDefault();
     event?.stopPropagation();
-    emojiPickerCanvasId = null;
+    closeCanvasMetaPopover();
     pendingPurgeCanvasId = null;
     pendingDeleteCanvasId = id;
     renderCanvasList();
@@ -1752,7 +1804,7 @@ function requestDeleteCanvas(id, event){
 function requestPurgeCanvas(id, event){
     event?.preventDefault();
     event?.stopPropagation();
-    emojiPickerCanvasId = null;
+    closeCanvasMetaPopover();
     pendingDeleteCanvasId = null;
     pendingPurgeCanvasId = id;
     renderCanvasList();
@@ -1848,9 +1900,11 @@ gateTitleInput.addEventListener('keydown', e => {
 document.addEventListener('mousedown', e => {
     if(emojiPickerCanvasId === null) return;
     if(e.target.closest('.canvas-meta-pop') || e.target.closest('.canvas-preview-mark') || e.target.closest('.canvas-owner-chip')) return;
-    emojiPickerCanvasId = null;
+    closeCanvasMetaPopover();
     renderCanvasList();
 });
+gateCanvasList?.addEventListener('scroll', () => requestAnimationFrame(positionCanvasMetaPopover), {passive:true});
+window.addEventListener('resize', () => requestAnimationFrame(positionCanvasMetaPopover));
 window.addEventListener('studio-theme-change', event => applyTheme(event.detail?.theme || 'light'));
 document.getElementById('cropBox').addEventListener('mousedown', event => beginCropDrag(event, 'move'));
 document.getElementById('cropHandle').addEventListener('mousedown', event => beginCropDrag(event, 'resize'));
@@ -5761,6 +5815,12 @@ function activeCanvasAssetLibrary(){
 function canvasAssetCategories(){
     return (activeCanvasAssetLibrary()?.categories || canvasAssetLibrary.categories || []).filter(cat => {
         const type = String(cat.type || 'image').toLowerCase();
+        return type === 'image' || type === 'media' || type === 'workflow';
+    });
+}
+function canvasMediaCategories(){
+    return (activeCanvasAssetLibrary()?.categories || canvasAssetLibrary.categories || []).filter(cat => {
+        const type = String(cat.type || 'image').toLowerCase();
         return type === 'image' || type === 'media';
     });
 }
@@ -5768,13 +5828,26 @@ function activeCanvasAssetCategory(){
     const cats = canvasAssetCategories();
     return cats.find(cat => cat.id === activeCanvasAssetCategoryId) || cats[0] || null;
 }
+function activeCanvasMediaCategory(){
+    const cats = canvasMediaCategories();
+    return cats.find(cat => cat.id === activeCanvasAssetCategoryId) || cats[0] || null;
+}
+function canvasWorkflowCategories(){
+    return (activeCanvasAssetLibrary()?.categories || canvasAssetLibrary.categories || []).filter(cat => String(cat.type || '').toLowerCase() === 'workflow');
+}
+function activeCanvasWorkflowCategory(){
+    const cats = canvasWorkflowCategories();
+    return cats.find(cat => cat.id === activeCanvasWorkflowCategoryId) || cats[0] || null;
+}
 function currentCanvasAssetItem(itemId){
     return (activeCanvasAssetCategory()?.items || []).find(item => item.id === itemId) || null;
 }
 function canvasAssetItemKind(item){
     const explicit = String(item?.kind || item?.mediaKind || '').toLowerCase();
-    if(['image','video','audio','text','file'].includes(explicit)) return explicit;
+    if(['image','video','audio','text','file','workflow'].includes(explicit)) return explicit;
+    if(String(item?.type || '').toLowerCase() === 'workflow') return 'workflow';
     const url = String(item?.url || item || '');
+    if(/\.(json|zip)(\?|#|$)/i.test(url)) return 'workflow';
     if(isVideoUrl(url)) return 'video';
     if(isAudioUrl(url)) return 'audio';
     return 'image';
@@ -5788,6 +5861,9 @@ function canvasAssetThumbHtml(item){
     }
     if(kind === 'audio'){
         return `<div class="canvas-asset-thumb-wrap canvas-asset-file-thumb"><i data-lucide="file-audio" class="w-6 h-6"></i><span>${escapeHtml(item?.name || 'audio')}</span></div>`;
+    }
+    if(kind === 'workflow'){
+        return `<div class="canvas-asset-thumb-wrap canvas-asset-file-thumb workflow-thumb"><i data-lucide="workflow" class="w-6 h-6"></i><span>${escapeHtml(item?.name || 'workflow')}</span></div>`;
     }
     return `<div class="canvas-asset-thumb-wrap"><img class="canvas-asset-thumb" src="${thumb}" alt=""></div>`;
 }
@@ -5805,6 +5881,7 @@ function positionCanvasAssetHoverPreview(event){
 }
 function showCanvasAssetHoverPreview(event, item){
     if(!canvasAssetHoverPreview || !item?.url) return;
+    if(canvasAssetItemKind(item) === 'workflow') return;
     const img = canvasAssetHoverPreview.querySelector('img');
     const video = canvasAssetHoverPreview.querySelector('video');
     const isVideo = canvasAssetItemKind(item) === 'video';
@@ -5886,9 +5963,18 @@ function renderCanvasAssetLibrary(){
     const cats = canvasAssetCategories();
     if(!cats.some(cat => cat.id === activeCanvasAssetCategoryId)) activeCanvasAssetCategoryId = cats[0]?.id || '';
     if(canvasAssetCategorySelect){
-        canvasAssetCategorySelect.innerHTML = cats.map(cat => `<option value="${escapeAttr(cat.id)}" ${cat.id === activeCanvasAssetCategoryId ? 'selected' : ''}>${escapeHtml(cat.name || '默认分组')}</option>`).join('');
+        canvasAssetCategorySelect.innerHTML = cats.map(cat => {
+            const type = String(cat.type || 'image').toLowerCase();
+            const prefix = type === 'workflow' ? '工作流 / ' : '';
+            return `<option value="${escapeAttr(cat.id)}" ${cat.id === activeCanvasAssetCategoryId ? 'selected' : ''}>${escapeHtml(prefix + (cat.name || '默认分组'))}</option>`;
+        }).join('');
     }
-    const items = activeCanvasAssetCategory()?.items || [];
+    const cat = activeCanvasAssetCategory();
+    const catType = String(cat?.type || 'image').toLowerCase();
+    if(canvasAssetDropZone) {
+        canvasAssetDropZone.textContent = catType === 'workflow' ? '工作流分组支持上传/导出工作流，双击卡片导入画布' : '拖入图片或输出保存到当前分组';
+    }
+    const items = cat?.items || [];
     canvasAssetGrid.innerHTML = items.length ? items.map(item => `
         <div class="canvas-asset-item" draggable="true" data-asset-id="${escapeAttr(item.id || '')}" data-url="${escapeAttr(item.url)}" data-name="${escapeAttr(item.name || 'asset')}" data-kind="${escapeAttr(canvasAssetItemKind(item))}">
             ${canvasAssetThumbHtml(item)}
@@ -5905,7 +5991,10 @@ function renderCanvasAssetLibrary(){
             event.dataTransfer.setData('application/x-canvas-asset', JSON.stringify({url:card.dataset.url, name:card.dataset.name, kind:card.dataset.kind || ''}));
             event.dataTransfer.setData('text/plain', card.dataset.url || '');
         });
-        card.addEventListener('dblclick', () => createImageCardFromUrl(card.dataset.url, defaultPoint(0, 0), card.dataset.name || 'asset'));
+        card.addEventListener('dblclick', () => {
+            if(card.dataset.kind === 'workflow') importWorkflowAssetUrl(card.dataset.url, card.dataset.name || 'workflow');
+            else createImageCardFromUrl(card.dataset.url, defaultPoint(0, 0), card.dataset.name || 'asset');
+        });
         const item = items.find(entry => entry.id === card.dataset.assetId);
         card.addEventListener('mouseenter', event => showCanvasAssetHoverPreview(event, item));
         card.addEventListener('mousemove', positionCanvasAssetHoverPreview);
@@ -5930,6 +6019,7 @@ function renderCanvasAssetLibrary(){
 }
 function toggleCanvasAssetLibrary(open=!canvasAssetLibraryOpen){
     canvasAssetLibraryOpen = !!open;
+    if(canvasAssetLibraryOpen && workflowTransferModal?.classList.contains('open')) closeWorkflowTransferModal();
     canvasAssetPanel?.classList.toggle('open', canvasAssetLibraryOpen);
     canvasAssetToggle?.classList.toggle('active', canvasAssetLibraryOpen);
     if(!canvasAssetLibraryOpen) hideCanvasAssetHoverPreview();
@@ -5938,6 +6028,7 @@ function toggleCanvasAssetLibrary(open=!canvasAssetLibraryOpen){
 async function addUrlToCanvasAssetLibrary(url, name=''){
     const cat = activeCanvasAssetCategory();
     if(!cat){ setStatus('请先创建资产分组'); return; }
+    if(String(cat.type || 'image').toLowerCase() === 'workflow'){ setStatus('当前是工作流分组，请切换到图片分组保存媒体'); return; }
     const data = await fetch('/api/asset-library/items', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -5977,14 +6068,16 @@ function renderAssetManager(){
     if(!assetManagerBody) return;
     document.querySelectorAll('[data-manager-tab]').forEach(btn => btn.classList.toggle('active', btn.dataset.managerTab === assetManagerTab));
     if(assetManagerTab === 'prompts') renderPromptAssetManager();
+    else if(assetManagerTab === 'workflows') renderWorkflowAssetManager();
     else renderImageAssetManager();
     refreshIcons();
 }
 function renderImageAssetManager(){
     const libs = canvasAssetLibraries();
     const library = activeCanvasAssetLibrary();
-    const cats = canvasAssetCategories();
-    const cat = activeCanvasAssetCategory();
+    const cats = canvasMediaCategories();
+    if(!cats.some(cat => cat.id === activeCanvasAssetCategoryId)) activeCanvasAssetCategoryId = cats[0]?.id || '';
+    const cat = activeCanvasMediaCategory();
     const items = cat?.items || [];
     const canEditLibrary = !!library;
     const canEditCategory = !!cat;
@@ -6031,6 +6124,62 @@ function renderImageAssetManager(){
         const data = await uploadFilesToLibrary(upload.files, library.id, cat.id);
         if(data?.library) canvasAssetLibrary = data.library;
         managerSelectedAssetIds.clear();
+        renderAssetManager();
+        renderCanvasAssetLibrary();
+    });
+}
+function workflowAssetThumbHtml(item){
+    return `<div class="asset-manager-card-text workflow-manager-thumb"><i data-lucide="workflow" class="w-6 h-6"></i><span>${escapeHtml(item?.format === 'json' ? 'JSON 工作流' : 'ZIP 工作流包')}</span></div>`;
+}
+function renderWorkflowAssetManager(){
+    const libs = canvasAssetLibraries();
+    const library = activeCanvasAssetLibrary();
+    const cats = canvasWorkflowCategories();
+    if(!cats.some(cat => cat.id === activeCanvasWorkflowCategoryId)) activeCanvasWorkflowCategoryId = cats[0]?.id || '';
+    const cat = activeCanvasWorkflowCategory();
+    const items = cat?.items || [];
+    assetManagerBody.innerHTML = `
+        <div class="asset-manager-side">
+            <div class="asset-manager-tools">
+                <button type="button" class="primary" data-manager-workflow-cat-new><i data-lucide="folder-plus" class="w-4 h-4"></i><span>新分组</span></button>
+            </div>
+            <div class="asset-manager-list">
+                ${libs.map(lib => `<button type="button" class="${lib.id === activeCanvasAssetLibraryId ? 'active' : ''}" data-manager-workflow-lib="${escapeAttr(lib.id)}"><span>${escapeHtml(lib.name || '资产库')}</span><small>${(lib.categories || []).filter(c => String(c.type || '') === 'workflow').reduce((n,c)=>n+(c.items || []).length,0)}</small></button>`).join('')}
+            </div>
+            <div class="asset-manager-list">
+                ${cats.map(item => `<button type="button" class="${item.id === activeCanvasWorkflowCategoryId ? 'active' : ''}" data-manager-workflow-cat="${escapeAttr(item.id)}"><span>${escapeHtml(item.name || '工作流')}</span><small>${(item.items || []).length}</small></button>`).join('') || '<div class="canvas-asset-empty">暂无工作流分组</div>'}
+            </div>
+        </div>
+        <div class="asset-manager-main">
+            <div class="asset-manager-tools">
+                <label class="${!cat ? 'disabled' : ''}"><i data-lucide="upload" class="w-4 h-4"></i><span>上传工作流</span><input id="managerWorkflowUpload" type="file" multiple accept=".json,.zip,application/json,application/zip" ${!cat ? 'disabled' : ''}></label>
+                <button type="button" ${!managerSelectedWorkflowIds.size ? 'disabled' : ''} data-manager-workflow-export><i data-lucide="download" class="w-4 h-4"></i><span>导出所选 ${managerSelectedWorkflowIds.size ? managerSelectedWorkflowIds.size : ''}</span></button>
+                <button type="button" class="danger" ${managerSelectedWorkflowIds.size ? '' : 'disabled'} data-manager-workflow-delete><i data-lucide="trash-2" class="w-4 h-4"></i><span>删除所选 ${managerSelectedWorkflowIds.size ? managerSelectedWorkflowIds.size : ''}</span></button>
+            </div>
+            <div class="asset-manager-grid">
+                ${items.length ? items.map(item => `<div class="asset-manager-card">
+                    <input type="checkbox" data-manager-workflow-check="${escapeAttr(item.id)}" ${managerSelectedWorkflowIds.has(item.id) ? 'checked' : ''}>
+                    ${workflowAssetThumbHtml(item)}
+                    <span class="asset-manager-card-name" title="${escapeAttr(item.name || '')}">${escapeHtml(item.name || 'workflow')}</span>
+                    <div class="asset-manager-card-actions">
+                        <button type="button" data-manager-workflow-download="${escapeAttr(item.id)}"><i data-lucide="download" class="w-3.5 h-3.5"></i><span>导出</span></button>
+                        <button type="button" data-manager-workflow-rename="${escapeAttr(item.id)}"><i data-lucide="pencil" class="w-3.5 h-3.5"></i><span>重命名</span></button>
+                        <button type="button" class="danger" data-manager-workflow-remove="${escapeAttr(item.id)}"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i><span>删除</span></button>
+                    </div>
+                </div>`).join('') : `<div class="canvas-asset-empty">当前分组为空</div>`}
+            </div>
+        </div>
+    `;
+    const upload = document.getElementById('managerWorkflowUpload');
+    upload?.addEventListener('change', async () => {
+        if(!upload.files?.length || !cat) return;
+        const form = new FormData();
+        form.append('library_id', library?.id || '');
+        form.append('category_id', cat.id || '');
+        [...upload.files].forEach(file => form.append('files', file));
+        const data = await fetch('/api/asset-library/workflows/upload', {method:'POST', body:form}).then(r => r.json());
+        canvasAssetLibrary = data.library || canvasAssetLibrary;
+        managerSelectedWorkflowIds.clear();
         renderAssetManager();
         renderCanvasAssetLibrary();
     });
@@ -10818,12 +10967,17 @@ function addGenerationLog({run, outputs=[], runMs=0, error=''}) {
     canvas.logs = [entry, ...canvas.logs].slice(0, 500);
 }
 function renderCanvasLog(){
-    const logs = canvas?.logs || [];
-    logList.innerHTML = logs.length ? logs.map(log => {
-        const thumbs = (log.outputs || []).slice(0, 8).map(url => {
+    const list = document.getElementById('logList') || (typeof logList !== 'undefined' ? logList : null);
+    const logs = (typeof canvas !== 'undefined' && Array.isArray(canvas?.logs)) ? canvas.logs : [];
+    if(!list) return;
+    list.innerHTML = logs.length ? logs.map(log => {
+        const thumbs = (log.outputs || []).slice(0, 8).map(item => {
+            const url = outputUrlValue(item);
+            if(!url) return '';
             const safe = escapeAttr(url);
             if(isMissingAssetUrl(url)) return `<div class="missing-asset compact" data-url="${safe}"><i data-lucide="image-off" class="w-4 h-4"></i></div>`;
-            return isVideoUrl(url) ? `<video src="${safe}" data-url="${safe}" muted playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"></video>` : `<img src="${safe}" data-url="${safe}" alt="output">`;
+            const kind = mediaKindForOutputItem(item);
+            return kind === 'video' ? `<video src="${safe}" data-url="${safe}" muted playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"></video>` : `<img src="${safe}" data-url="${safe}" alt="output">`;
         }).join('');
         const date = new Date(log.createdAt || Date.now()).toLocaleString(window.StudioI18n?.lang() === 'en' ? 'en-US' : 'zh-CN');
         const req = log.request || {};
@@ -10855,13 +11009,13 @@ function renderCanvasLog(){
             <div class="log-thumbs">${thumbs}</div>
         </div>`;
     }).join('') : `<div class="log-empty">${tr('canvas.noLogs')}</div>`;
-    logList.querySelectorAll('[data-url]').forEach(el => {
+    list.querySelectorAll('[data-url]').forEach(el => {
         el.onclick = e => {
             e.stopPropagation();
             openOutputLightbox(el.dataset.url, null);
         };
     });
-    logList.querySelectorAll('[data-prompt]').forEach(el => {
+    list.querySelectorAll('[data-prompt]').forEach(el => {
         el.onclick = e => {
             e.stopPropagation();
             const text = el.dataset.prompt || '';
@@ -10877,14 +11031,39 @@ function renderCanvasLog(){
     });
     refreshIcons();
 }
-function openCanvasLog(){
-    if(!ensureCanvas()) return;
-    renderCanvasLog();
-    logModal.classList.add('open');
+async function importWorkflowAssetUrl(url, name='workflow'){
+    if(!canvas || !url) return;
+    try {
+        const res = await fetch(url, {cache:'no-store'});
+        if(!res.ok) throw new Error('读取工作流资产失败');
+        const blob = await res.blob();
+        const fileName = name && /\.(json|zip)$/i.test(name) ? name : (url.split('/').pop()?.split('?')[0] || `${name || 'workflow'}.zip`);
+        await importWorkflowFile(new File([blob], fileName, {type:blob.type || 'application/octet-stream'}));
+    } catch(err) {
+        showErrorModal(err.message || '导入工作流资产失败', '导入工作流');
+    }
+}
+function openCanvasLog(event){
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    event?.stopImmediatePropagation?.();
+    const modal = document.getElementById('logModal') || (typeof logModal !== 'undefined' ? logModal : null);
+    const list = document.getElementById('logList') || (typeof logList !== 'undefined' ? logList : null);
+    modal?.classList.add('open');
+    if(list && !list.innerHTML) list.innerHTML = `<div class="log-empty">${tr('canvas.noLogs')}</div>`;
+    try {
+        renderCanvasLog();
+    } catch(err) {
+        console.error('renderCanvasLog failed', err);
+        if(list) list.innerHTML = `<div class="log-empty">${escapeHtml(err?.message || String(err))}</div>`;
+    }
 }
 function closeCanvasLog(){
-    logModal.classList.remove('open');
+    const modal = document.getElementById('logModal') || (typeof logModal !== 'undefined' ? logModal : null);
+    modal?.classList.remove('open');
 }
+window.openCanvasLog = openCanvasLog;
+window.closeCanvasLog = closeCanvasLog;
 function makePending(id, run, task={}){
     return {id, startedAt:nowMs(), run, ...task};
 }
@@ -11319,6 +11498,44 @@ promptTemplatePanel?.addEventListener('click', event => {
     }
 });
 canvasAssetToggle?.addEventListener('click', () => toggleCanvasAssetLibrary());
+workflowTransferToggle?.addEventListener('click', () => {
+    if(workflowTransferModal?.classList.contains('open')) closeWorkflowTransferModal();
+    else openWorkflowTransferModal();
+});
+canvasLogToggle?.addEventListener('click', event => {
+    event.preventDefault();
+    openCanvasLog();
+});
+workflowImportInput?.addEventListener('change', event => {
+    const file = event.target.files?.[0];
+    if(file) importWorkflowFile(file);
+    event.target.value = '';
+});
+workflowImportDropZone?.addEventListener('click', () => workflowImportInput?.click());
+workflowImportDropZone?.addEventListener('dragenter', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    workflowImportDropZone.classList.add('drag-over');
+});
+workflowImportDropZone?.addEventListener('dragover', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+    workflowImportDropZone.classList.add('drag-over');
+});
+workflowImportDropZone?.addEventListener('dragleave', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if(!workflowImportDropZone.contains(event.relatedTarget)) workflowImportDropZone.classList.remove('drag-over');
+});
+workflowImportDropZone?.addEventListener('drop', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    workflowImportDropZone.classList.remove('drag-over');
+    const file = [...(event.dataTransfer?.files || [])].find(item => /\.(json|zip)$/i.test(item.name || ''));
+    if(file) importWorkflowFile(file);
+    else setStatus('请拖入 JSON 或 ZIP 工作流文件');
+});
 canvasAssetCloseBtn?.addEventListener('click', () => toggleCanvasAssetLibrary(false));
 canvasAssetLibrarySelect?.addEventListener('change', () => {
     activeCanvasAssetLibraryId = canvasAssetLibrarySelect.value || '';
@@ -11351,6 +11568,30 @@ canvasAssetPanel?.addEventListener('wheel', event => {
     scroller.scrollTop += event.deltaY;
     scroller.scrollLeft += event.deltaX;
 }, {passive:false, capture:true});
+workflowTransferModal?.addEventListener('wheel', event => {
+    event.stopPropagation();
+}, {passive:true, capture:true});
+workflowTransferModal?.addEventListener('dragover', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if(workflowImportDropZone){
+        event.dataTransfer.dropEffect = 'copy';
+        workflowImportDropZone.classList.add('drag-over');
+    }
+});
+workflowTransferModal?.addEventListener('dragleave', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if(!workflowTransferModal.contains(event.relatedTarget)) workflowImportDropZone?.classList.remove('drag-over');
+});
+workflowTransferModal?.addEventListener('drop', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    workflowImportDropZone?.classList.remove('drag-over');
+    const file = [...(event.dataTransfer?.files || [])].find(item => /\.(json|zip)$/i.test(item.name || ''));
+    if(file) importWorkflowFile(file);
+    else setStatus('请拖入 JSON 或 ZIP 工作流文件');
+});
 function hasCanvasAssetSaveDrop(dataTransfer){
     return hasOutputImageDrag(dataTransfer) || hasImageDropData(dataTransfer);
 }
@@ -11408,6 +11649,12 @@ assetManagerModal?.addEventListener('change', event => {
         else managerSelectedPromptIds.delete(promptCheck.dataset.managerPromptCheck);
         shouldRender = true;
     }
+    const workflowCheck = event.target.closest?.('[data-manager-workflow-check]');
+    if(workflowCheck){
+        if(workflowCheck.checked) managerSelectedWorkflowIds.add(workflowCheck.dataset.managerWorkflowCheck);
+        else managerSelectedWorkflowIds.delete(workflowCheck.dataset.managerWorkflowCheck);
+        shouldRender = true;
+    }
     if(shouldRender) renderAssetManager();
 });
 assetManagerModal?.addEventListener('click', async event => {
@@ -11415,12 +11662,42 @@ assetManagerModal?.addEventListener('click', async event => {
     if(assetLib){ activeCanvasAssetLibraryId = assetLib.dataset.managerAssetLib || ''; activeCanvasAssetCategoryId = ''; managerSelectedAssetIds.clear(); renderAssetManager(); return; }
     const assetCat = event.target.closest?.('[data-manager-asset-cat]');
     if(assetCat){ activeCanvasAssetCategoryId = assetCat.dataset.managerAssetCat || ''; managerSelectedAssetIds.clear(); renderAssetManager(); return; }
+    const workflowLib = event.target.closest?.('[data-manager-workflow-lib]');
+    if(workflowLib){ activeCanvasAssetLibraryId = workflowLib.dataset.managerWorkflowLib || ''; activeCanvasWorkflowCategoryId = ''; managerSelectedWorkflowIds.clear(); renderAssetManager(); return; }
+    const workflowCat = event.target.closest?.('[data-manager-workflow-cat]');
+    if(workflowCat){ activeCanvasWorkflowCategoryId = workflowCat.dataset.managerWorkflowCat || ''; managerSelectedWorkflowIds.clear(); renderAssetManager(); return; }
     const promptLib = event.target.closest?.('[data-manager-prompt-lib]');
     if(promptLib){ activePromptLibraryId = promptLib.dataset.managerPromptLib || 'system'; managerSelectedPromptIds.clear(); renderAssetManager(); return; }
+    const workflowDownload = event.target.closest?.('[data-manager-workflow-download]');
+    if(workflowDownload){
+        const item = (activeCanvasWorkflowCategory()?.items || []).find(entry => entry.id === (workflowDownload.dataset.managerWorkflowDownload || ''));
+        if(item?.url) downloadUrl(item.url, `${item.name || 'workflow'}${String(item.url).toLowerCase().endsWith('.json') ? '.json' : '.zip'}`);
+        return;
+    }
+    const workflowRename = event.target.closest?.('[data-manager-workflow-rename]');
+    if(workflowRename){
+        const itemId = workflowRename.dataset.managerWorkflowRename || '';
+        const item = (activeCanvasWorkflowCategory()?.items || []).find(entry => entry.id === itemId);
+        const name = window.prompt('工作流名称', item?.name || '');
+        if(!item || !String(name || '').trim()) return;
+        const data = await fetch(`/api/asset-library/items/${encodeURIComponent(item.id)}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})}).then(r => r.json());
+        canvasAssetLibrary = data.library || canvasAssetLibrary;
+        renderAssetManager(); renderCanvasAssetLibrary(); return;
+    }
+    const workflowRemove = event.target.closest?.('[data-manager-workflow-remove]');
+    if(workflowRemove){
+        const itemId = workflowRemove.dataset.managerWorkflowRemove || '';
+        const item = (activeCanvasWorkflowCategory()?.items || []).find(entry => entry.id === itemId);
+        if(!item || !window.confirm(`删除工作流「${item.name || 'workflow'}」？`)) return;
+        const data = await fetch(`/api/asset-library/items/${encodeURIComponent(item.id)}`, {method:'DELETE'}).then(r => r.json());
+        canvasAssetLibrary = data.library || canvasAssetLibrary;
+        managerSelectedWorkflowIds.delete(item.id);
+        renderAssetManager(); renderCanvasAssetLibrary(); return;
+    }
     const assetRename = event.target.closest?.('[data-manager-asset-rename]');
     if(assetRename){
         const itemId = assetRename.dataset.managerAssetRename || '';
-        const item = (activeCanvasAssetCategory()?.items || []).find(entry => entry.id === itemId);
+        const item = (activeCanvasMediaCategory()?.items || []).find(entry => entry.id === itemId);
         const name = window.prompt('资产名称', item?.name || '');
         if(!item || !String(name || '').trim()) return;
         const data = await fetch(`/api/asset-library/items/${encodeURIComponent(item.id)}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})}).then(r => r.json());
@@ -11430,7 +11707,7 @@ assetManagerModal?.addEventListener('click', async event => {
     const assetRemove = event.target.closest?.('[data-manager-asset-remove]');
     if(assetRemove){
         const itemId = assetRemove.dataset.managerAssetRemove || '';
-        const item = (activeCanvasAssetCategory()?.items || []).find(entry => entry.id === itemId);
+        const item = (activeCanvasMediaCategory()?.items || []).find(entry => entry.id === itemId);
         if(!item || !window.confirm(`删除资产「${item.name || 'asset'}」？`)) return;
         const data = await fetch(`/api/asset-library/items/${encodeURIComponent(item.id)}`, {method:'DELETE'}).then(r => r.json());
         canvasAssetLibrary = data.library || canvasAssetLibrary;
@@ -11501,7 +11778,7 @@ assetManagerModal?.addEventListener('click', async event => {
         renderAssetManager(); renderCanvasAssetLibrary(); return;
     }
     if(event.target.closest?.('[data-manager-asset-cat-rename]')){
-        const cat = activeCanvasAssetCategory();
+        const cat = activeCanvasMediaCategory();
         const name = window.prompt('分组名称', cat?.name || '');
         if(!cat || !String(name || '').trim()) return;
         const data = await fetch(`/api/asset-library/categories/${encodeURIComponent(cat.id)}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})}).then(r => r.json());
@@ -11509,11 +11786,11 @@ assetManagerModal?.addEventListener('click', async event => {
         renderAssetManager(); renderCanvasAssetLibrary(); return;
     }
     if(event.target.closest?.('[data-manager-asset-cat-delete]')){
-        const cat = activeCanvasAssetCategory();
+        const cat = activeCanvasMediaCategory();
         if(!cat || !window.confirm(`删除分组「${cat.name || '分组'}」？`)) return;
         const data = await fetch(`/api/asset-library/categories/${encodeURIComponent(cat.id)}`, {method:'DELETE'}).then(r => r.json());
         canvasAssetLibrary = data.library || canvasAssetLibrary;
-        activeCanvasAssetCategoryId = canvasAssetCategories()[0]?.id || '';
+        activeCanvasAssetCategoryId = canvasMediaCategories()[0]?.id || '';
         renderAssetManager(); renderCanvasAssetLibrary(); return;
     }
     if(event.target.closest?.('[data-manager-asset-delete]')){
@@ -11521,6 +11798,32 @@ assetManagerModal?.addEventListener('click', async event => {
         const data = await fetch('/api/asset-library/items/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library_id:activeCanvasAssetLibraryId, ids:[...managerSelectedAssetIds]})}).then(r => r.json());
         canvasAssetLibrary = data.library || canvasAssetLibrary;
         managerSelectedAssetIds.clear();
+        renderAssetManager(); renderCanvasAssetLibrary(); return;
+    }
+    if(event.target.closest?.('[data-manager-workflow-export]')){
+        const items = (activeCanvasWorkflowCategory()?.items || []).filter(item => managerSelectedWorkflowIds.has(item.id));
+        if(items.length === 1) {
+            const item = items[0];
+            downloadUrl(item.url, `${item.name || 'workflow'}${String(item.url).toLowerCase().endsWith('.json') ? '.json' : '.zip'}`);
+        } else if(items.length > 1) {
+            const res = await fetch('/api/canvas-assets/download', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({filename:'workflows.zip', items:items.map(item => ({url:item.url, name:item.name || 'workflow'}))})});
+            if(res.ok) downloadBlob(await res.blob(), 'workflows.zip');
+        }
+        return;
+    }
+    if(event.target.closest?.('[data-manager-workflow-delete]')){
+        if(!managerSelectedWorkflowIds.size) return;
+        const data = await fetch('/api/asset-library/items/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library_id:activeCanvasAssetLibraryId, ids:[...managerSelectedWorkflowIds]})}).then(r => r.json());
+        canvasAssetLibrary = data.library || canvasAssetLibrary;
+        managerSelectedWorkflowIds.clear();
+        renderAssetManager(); renderCanvasAssetLibrary(); return;
+    }
+    if(event.target.closest?.('[data-manager-workflow-cat-new]')){
+        const name = window.prompt('工作流分组名称', '工作流');
+        if(!String(name || '').trim()) return;
+        const data = await fetch('/api/asset-library/categories', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library_id:activeCanvasAssetLibraryId, name, type:'workflow'})}).then(r => r.json());
+        canvasAssetLibrary = data.library || canvasAssetLibrary;
+        activeCanvasWorkflowCategoryId = data.category?.id || activeCanvasWorkflowCategoryId;
         renderAssetManager(); renderCanvasAssetLibrary(); return;
     }
     if(event.target.closest?.('[data-manager-prompt-lib-new]')){
@@ -11854,6 +12157,7 @@ function finishSelection(){
     window.onmousemove = null;
     window.onmouseup = null;
     render();
+    if(workflowTransferModal?.classList.contains('open')) updateWorkflowTransferMeta();
 }
 function renderSelectionHub(){
     selectionHub.innerHTML = '';
@@ -11947,6 +12251,230 @@ function pasteNodes(){
     render();
     scheduleSave();
 }
+function selectedWorkflowPayload(){
+    const ids = new Set([...selected].filter(id => nodes.some(n => n.id === id)));
+    const pickedNodes = [...ids].map(id => nodes.find(n => n.id === id)).filter(Boolean);
+    const pickedConnections = connections.filter(c => ids.has(c.from) && ids.has(c.to)).map(c => ({...c}));
+    return {
+        format:'infinite-canvas-workflow',
+        version:1,
+        exported_at:Date.now(),
+        nodes:serializableCanvasNodes(pickedNodes),
+        connections:pickedConnections
+    };
+}
+function workflowFilename(ext){
+    const title = (canvas?.title || 'canvas-workflow').replace(/[\\/:*?"<>|]+/g, '_').slice(0, 48) || 'canvas-workflow';
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
+    return `${title}-${stamp}.${ext}`;
+}
+function downloadBlob(blob, filename){
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1200);
+}
+function downloadUrl(url, filename='download'){
+    if(!url) return;
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename || '';
+    link.target = '_blank';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+}
+function openWorkflowTransferModal(){
+    if(!canvas){ setStatus(tr('canvas.needCanvas')); return; }
+    if(canvasAssetLibraryOpen) toggleCanvasAssetLibrary(false);
+    updateWorkflowTransferMeta();
+    workflowTransferModal?.classList.add('open');
+    workflowTransferToggle?.classList.add('active');
+    refreshIcons();
+}
+function closeWorkflowTransferModal(){
+    workflowTransferModal?.classList.remove('open');
+    workflowTransferToggle?.classList.remove('active');
+    workflowImportDropZone?.classList.remove('drag-over');
+}
+function updateWorkflowTransferMeta(){
+    const payload = selectedWorkflowPayload();
+    const nodeCount = payload.nodes.length;
+    const connCount = payload.connections.length;
+    workflowExportMeta?.classList.remove('busy', 'success');
+    if(workflowExportMeta) workflowExportMeta.textContent = nodeCount ? `已选择 ${nodeCount} 个节点，${connCount} 条连线` : '未选择节点，请先框选要导出的组件';
+    if(workflowTransferSub) workflowTransferSub.textContent = nodeCount ? '导出当前框选内容，或把工作流导入到当前画布' : '请先框选节点再导出；导入会追加到当前画布';
+}
+function setWorkflowLibraryExportState(state='idle', text='导出到资产库'){
+    if(!workflowExportLibraryBtn) return;
+    workflowExportLibraryBtn.disabled = state === 'busy';
+    workflowExportLibraryBtn.classList.toggle('busy', state === 'busy');
+    workflowExportLibraryBtn.classList.toggle('success', state === 'success');
+    const icon = state === 'busy' ? 'loader-2' : state === 'success' ? 'check' : 'library-big';
+    workflowExportLibraryBtn.innerHTML = `<i data-lucide="${icon}" class="w-4 h-4"></i><span>${escapeHtml(text)}</span>`;
+    refreshIcons();
+}
+async function exportSelectedWorkflow(includeResources=false){
+    if(!canvas) return;
+    const payload = selectedWorkflowPayload();
+    if(!payload.nodes.length){
+        if(workflowExportMeta) workflowExportMeta.textContent = '未选择节点，请先框选要导出的组件';
+        if(workflowTransferSub) workflowTransferSub.textContent = '请先框选节点再导出；导入会追加到当前画布';
+        setStatus('未选择节点，请先框选要导出的组件');
+        return;
+    }
+    try {
+        if(!includeResources){
+            const filename = workflowFilename('json');
+            downloadBlob(new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'}), filename);
+            setStatus('已导出工作流 JSON');
+            return;
+        }
+        const filename = workflowFilename('zip');
+        const res = await fetch('/api/canvas-workflows/export', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({...payload, include_resources:true, filename})
+        });
+        if(!res.ok) throw new Error(await responseErrorMessage(res, '导出工作流失败'));
+        const blob = await res.blob();
+        downloadBlob(blob, filename);
+        setStatus('已导出包含资源的工作流包');
+    } catch(err) {
+        showErrorModal(err.message || '导出工作流失败', '导出工作流');
+    }
+}
+function defaultWorkflowAssetTarget(){
+    const libs = canvasAssetLibraries();
+    let lib = activeCanvasAssetLibrary() || libs[0] || null;
+    if(!lib) return {libraryId:'', categoryId:''};
+    let cat = (lib.categories || []).find(item => String(item.type || '').toLowerCase() === 'workflow');
+    if(!cat){
+        lib = libs.find(item => (item.categories || []).some(cat => String(cat.type || '').toLowerCase() === 'workflow')) || lib;
+        cat = (lib.categories || []).find(item => String(item.type || '').toLowerCase() === 'workflow');
+    }
+    return {libraryId:lib?.id || '', categoryId:cat?.id || ''};
+}
+async function exportSelectedWorkflowToLibrary(){
+    if(!canvas) return;
+    const payload = selectedWorkflowPayload();
+    if(!payload.nodes.length){
+        if(workflowExportMeta) workflowExportMeta.textContent = '未选择节点，请先框选要导出的组件';
+        setStatus('未选择节点，请先框选要导出的组件');
+        return;
+    }
+    try {
+        setWorkflowLibraryExportState('busy', '导出中...');
+        if(workflowExportMeta){
+            workflowExportMeta.classList.remove('success');
+            workflowExportMeta.classList.add('busy');
+            workflowExportMeta.textContent = '正在导出到资产库...';
+        }
+        if(workflowTransferSub) workflowTransferSub.textContent = '正在保存工作流到资产库';
+        setStatus('正在导出工作流到资产库...');
+        if(!canvasAssetLibrary?.libraries?.length) await loadCanvasAssetLibrary({renderPanel:false});
+        const filename = workflowFilename('zip');
+        const target = defaultWorkflowAssetTarget();
+        const res = await fetch('/api/canvas-workflows/export-to-library', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({...payload, include_resources:true, filename, name:filename.replace(/\.zip$/i, ''), library_id:target.libraryId, category_id:target.categoryId})
+        });
+        if(!res.ok) throw new Error(await responseErrorMessage(res, '导出到资产库失败'));
+        const data = await res.json();
+        canvasAssetLibrary = data.library || canvasAssetLibrary;
+        activeCanvasAssetLibraryId = target.libraryId || canvasAssetLibrary.active_library_id || activeCanvasAssetLibraryId;
+        activeCanvasAssetCategoryId = data.item ? findCanvasAssetCategoryForItem(data.item.id)?.id || activeCanvasAssetCategoryId : activeCanvasAssetCategoryId;
+        renderCanvasAssetLibrary();
+        if(assetManagerModal?.classList.contains('open')) renderAssetManager();
+        const itemName = data.item?.name || '工作流';
+        if(workflowExportMeta){
+            workflowExportMeta.classList.remove('busy');
+            workflowExportMeta.classList.add('success');
+            workflowExportMeta.textContent = `已导出到资产库：${itemName}`;
+        }
+        if(workflowTransferSub) workflowTransferSub.textContent = '导出完成，可在资产库的工作流分组中查看';
+        setWorkflowLibraryExportState('success', '已导出');
+        setStatus(`已导出工作流到资产库：${itemName}`);
+        setTimeout(() => {
+            setWorkflowLibraryExportState('idle');
+            if(workflowTransferModal?.classList.contains('open')) updateWorkflowTransferMeta();
+        }, 1800);
+    } catch(err) {
+        setWorkflowLibraryExportState('idle');
+        workflowExportMeta?.classList.remove('busy', 'success');
+        showErrorModal(err.message || '导出到资产库失败', '导出工作流');
+    }
+}
+function findCanvasAssetCategoryForItem(itemId){
+    for(const lib of canvasAssetLibraries()){
+        for(const cat of lib.categories || []){
+            if((cat.items || []).some(item => item.id === itemId)) return cat;
+        }
+    }
+    return null;
+}
+function normalizeImportedWorkflow(data){
+    if(Array.isArray(data?.nodes)) return {nodes:data.nodes, connections:Array.isArray(data.connections) ? data.connections : []};
+    if(Array.isArray(data?.workflow?.nodes)) return {nodes:data.workflow.nodes, connections:Array.isArray(data.workflow.connections) ? data.workflow.connections : []};
+    return {nodes:[], connections:[]};
+}
+function insertWorkflowIntoCanvas(imported){
+    const srcNodes = (imported.nodes || []).filter(Boolean);
+    const srcConnections = (imported.connections || []).filter(Boolean);
+    if(!canvas || !srcNodes.length) throw new Error('工作流中没有可导入的节点');
+    pushUndo();
+    const minX = Math.min(...srcNodes.map(n => Number(n.x || 0)));
+    const minY = Math.min(...srcNodes.map(n => Number(n.y || 0)));
+    const target = lastMouseBoard && Number.isFinite(lastMouseBoard.x) ? lastMouseBoard : defaultPoint(0, 0);
+    const dx = target.x - minX;
+    const dy = target.y - minY;
+    const idMap = new Map();
+    const newNodes = srcNodes.map(n => {
+        const copy = JSON.parse(JSON.stringify(serializableCanvasNode(n)));
+        const oldId = copy.id || uid(copy.type || 'n');
+        copy.id = uid(copy.type || 'n');
+        copy.x = Number(copy.x || 0) + dx;
+        copy.y = Number(copy.y || 0) + dy;
+        copy.running = false;
+        idMap.set(oldId, copy.id);
+        return copy;
+    });
+    newNodes.forEach(node => {
+        if((node.type === 'group' || node.type === 'promptGroup') && Array.isArray(node.items)){
+            node.items = node.items.map(id => idMap.get(id) || id).filter(id => idMap.has(id) || nodes.some(n => n.id === id));
+        }
+    });
+    const newConnections = srcConnections
+        .map(c => ({...c, id:uid('c'), from:idMap.get(c.from), to:idMap.get(c.to)}))
+        .filter(c => c.from && c.to);
+    nodes.push(...newNodes);
+    connections.push(...newConnections);
+    selected.clear();
+    newNodes.forEach(n => selected.add(n.id));
+    sanitizeConnections();
+    syncGeneratorInputs();
+    render();
+    scheduleSave();
+    setStatus(`已导入 ${newNodes.length} 个节点`);
+}
+async function importWorkflowFile(file){
+    if(!canvas || !file) return;
+    try {
+        const form = new FormData();
+        form.append('file', file);
+        const res = await fetch('/api/canvas-workflows/import', {method:'POST', body:form});
+        if(!res.ok) throw new Error(await responseErrorMessage(res, '导入工作流失败'));
+        const data = await res.json();
+        insertWorkflowIntoCanvas(normalizeImportedWorkflow(data));
+        closeWorkflowTransferModal();
+    } catch(err) {
+        showErrorModal(err.message || '导入工作流失败', '导入工作流');
+    }
+}
 function startNodeDrag(e, node){
     if(e.button !== 0) return;
     if(startKnifeDrag(e)) return;
@@ -12015,6 +12543,7 @@ function onNodeDrag(e){
     });
     renderLinks();
     renderSelectionHub();
+    if(workflowTransferModal?.classList.contains('open')) updateWorkflowTransferMeta();
     scheduleMinimapRender();
 }
 function startNodeResize(e, node){
@@ -12382,6 +12911,7 @@ function refreshSelectionVisuals(){
     });
     renderLinks();
     renderSelectionHub();
+    if(workflowTransferModal?.classList.contains('open')) updateWorkflowTransferMeta();
     scheduleMinimapRender();
 }
 function pathEl(x1,y1,x2,y2,cls){
@@ -12518,21 +13048,29 @@ minimap?.addEventListener('mousedown', e => {
         scheduleViewportSave();
     };
 });
-function startBoardPan(e){
+function startBoardPan(e, opts={}){
     if(!canvas) return false;
     if(isEditableTarget(e.target) || e.target.closest?.('#createMenu, #linkCreateMenu, #nodeInputMenu, #nodeOutputMenu, #imageNodeMenu, .minimap')) return false;
     e.preventDefault();
     e.stopPropagation();
     closeCreateMenu();
     if(document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
-    dragBoard = {sx:e.clientX, sy:e.clientY, ox:viewport.x, oy:viewport.y};
+    dragBoard = {sx:e.clientX, sy:e.clientY, ox:viewport.x, oy:viewport.y, moved:false, clearSelectionOnClick:Boolean(opts.clearSelectionOnClick)};
     document.body.classList.add('canvas-board-pan');
     window.onmousemove = e2 => {
+        if(Math.hypot(e2.clientX - dragBoard.sx, e2.clientY - dragBoard.sy) > 4) dragBoard.moved = true;
         viewport.x = dragBoard.ox + e2.clientX - dragBoard.sx;
         viewport.y = dragBoard.oy + e2.clientY - dragBoard.sy;
         applyViewport();
     };
-    window.onmouseup = endDrag;
+    window.onmouseup = e2 => {
+        const shouldClearSelection = dragBoard?.clearSelectionOnClick && !dragBoard.moved && selected.size;
+        if(shouldClearSelection){
+            selected.clear();
+            refreshSelectionVisuals();
+        }
+        endDrag(e2);
+    };
     return true;
 }
 
@@ -12558,11 +13096,7 @@ board.onmousedown = e => {
         startSelection(e);
         return;
     }
-    if(selected.size){
-        selected.clear();
-        refreshSelectionVisuals();
-    }
-    startBoardPan(e);
+    startBoardPan(e, {clearSelectionOnClick:true});
 };
 board.addEventListener('mousemove', e => {
     const point = screenToWorld(e.clientX, e.clientY);
@@ -12634,7 +13168,10 @@ board.addEventListener('drop', async e => {
     if(Array.from(e.dataTransfer?.types || []).includes('application/x-canvas-asset')){
         try {
             const payload = JSON.parse(e.dataTransfer.getData('application/x-canvas-asset') || '{}');
-            if(payload?.url) createImageCardFromUrl(payload.url, screenToWorld(e.clientX, e.clientY), payload.name || 'asset');
+            if(payload?.url) {
+                if(String(payload.kind || '').toLowerCase() === 'workflow') await importWorkflowAssetUrl(payload.url, payload.name || 'workflow');
+                else createImageCardFromUrl(payload.url, screenToWorld(e.clientX, e.clientY), payload.name || 'asset');
+            }
         } catch(err) {}
         return;
     }

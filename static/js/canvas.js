@@ -211,6 +211,7 @@ let dragBoard = null;
 let minimapDrag = false;
 let minimapState = null;
 let minimapRenderQueued = false;
+let zoomPreviewState = null;
 let resizeNode = null;
 let llmPaneDrag = null;
 let tempLink = null;
@@ -337,6 +338,8 @@ let imageEditBaseH = 0;
 let textSelectionGuard = null;
 const PROMPT_TEXT_MAX_LENGTH = 20000;
 const CLIENT_ID = 'canvas_' + Math.random().toString(36).slice(2);
+const ZOOM_PREVIEW_NODE_DEFAULT_SCALE = 1;
+const ZOOM_PREVIEW_NODE_MAX_SCALE = 1.15;
 const LTX_DIRECTOR_WORKFLOW = 'LTXDirectorv2-API.json';
 const LTX_DIRECTOR_WF_NODE = '46';
 const LTX_DIRECTOR_SEED_NODE = '94:28';
@@ -1003,6 +1006,104 @@ function centerViewportOnWorldPoint(point){
     applyViewport();
     renderLinks();
     renderSelectionHub();
+}
+function safeViewportScale(value){
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : 1;
+}
+function fitAllNodesViewport(){
+    const rect = board.getBoundingClientRect();
+    if(!nodes.length){
+        viewport.scale = 0.45;
+        viewport.x = rect.width / 2;
+        viewport.y = rect.height / 2;
+        applyViewport();
+        renderLinks();
+        renderSelectionHub();
+        scheduleViewportSave();
+        return;
+    }
+    const rects = nodes.map(estimatedNodeRect);
+    const minX = Math.min(...rects.map(r => r.x));
+    const minY = Math.min(...rects.map(r => r.y));
+    const maxX = Math.max(...rects.map(r => r.x + r.w));
+    const maxY = Math.max(...rects.map(r => r.y + r.h));
+    const pad = 180;
+    const width = Math.max(1, maxX - minX + pad * 2);
+    const height = Math.max(1, maxY - minY + pad * 2);
+    const nextScale = Math.max(0.06, Math.min(0.82, (rect.width - 80) / width, (rect.height - 80) / height));
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    viewport.scale = nextScale;
+    viewport.x = rect.width / 2 - cx * viewport.scale;
+    viewport.y = rect.height / 2 - cy * viewport.scale;
+    applyViewport();
+    renderLinks();
+    renderSelectionHub();
+    scheduleViewportSave();
+}
+function enterZoomPreview(){
+    if(zoomPreviewState || !canvas) return;
+    zoomPreviewState = {...viewport};
+    shell.classList.add('zoom-preview');
+    document.body.classList.add('canvas-zoom-preview');
+    closeCreateMenu();
+    closeLinkCreateMenu();
+    fitAllNodesViewport();
+}
+function exitZoomPreview(point=null){
+    if(!zoomPreviewState) return false;
+    const prev = zoomPreviewState;
+    zoomPreviewState = null;
+    shell.classList.remove('zoom-preview');
+    document.body.classList.remove('canvas-zoom-preview');
+    viewport.scale = safeViewportScale(prev.scale);
+    if(point){
+        const rect = board.getBoundingClientRect();
+        viewport.x = rect.width / 2 - point.x * viewport.scale;
+        viewport.y = rect.height / 2 - point.y * viewport.scale;
+    } else {
+        viewport.x = prev.x;
+        viewport.y = prev.y;
+    }
+    applyViewport();
+    renderLinks();
+    renderSelectionHub();
+    scheduleViewportSave();
+    return true;
+}
+function exitZoomPreviewToNode(nodeId){
+    if(!zoomPreviewState) return false;
+    const node = nodes.find(n => n.id === nodeId);
+    if(!node) return exitZoomPreview();
+    const prev = zoomPreviewState;
+    const boardRect = board.getBoundingClientRect();
+    const rect = estimatedNodeRect(node);
+    const cx = rect.x + rect.w / 2;
+    const cy = rect.y + rect.h / 2;
+    const fitW = Math.max(1, boardRect.width - 160);
+    const fitH = Math.max(1, boardRect.height - 160);
+    const fitScale = Math.min(
+        ZOOM_PREVIEW_NODE_MAX_SCALE,
+        fitW / Math.max(1, rect.w),
+        fitH / Math.max(1, rect.h)
+    );
+    const readableScale = Math.min(ZOOM_PREVIEW_NODE_MAX_SCALE, Math.max(ZOOM_PREVIEW_NODE_DEFAULT_SCALE, fitScale));
+    zoomPreviewState = null;
+    shell.classList.remove('zoom-preview');
+    document.body.classList.remove('canvas-zoom-preview');
+    viewport.scale = Math.max(safeViewportScale(prev.scale), readableScale);
+    viewport.x = boardRect.width / 2 - cx * viewport.scale;
+    viewport.y = boardRect.height / 2 - cy * viewport.scale;
+    applyViewport();
+    renderLinks();
+    renderSelectionHub();
+    scheduleViewportSave();
+    return true;
+}
+function toggleZoomPreview(){
+    if(zoomPreviewState) exitZoomPreview();
+    else enterZoomPreview();
 }
 function refreshGeometry(){
     renderLinks();
@@ -8074,7 +8175,8 @@ function comfyRandomValue(field){
     const name = `${field.input || ''} ${field.name || ''}`.toLowerCase();
     const looksSeed = name.includes('seed') || name.includes('noise') || name.includes('随机') || name.includes('噪');
     if(min === null) min = looksSeed ? 1 : 0;
-    if(max === null || max <= min) max = looksSeed ? 1000000000000000 : 999999;
+    if(max === null || max <= min) max = looksSeed ? 4294967295 : 999999;
+    if(looksSeed) max = Math.min(max, 4294967295);
     let value = min + Math.random() * (max - min);
     if(isFloat){
         const precision = Math.min(8, Math.max(1, String(field.step).split('.')[1]?.length || 2));
@@ -10716,29 +10818,6 @@ function computeConnectedWorkflowOrder(anchorId){
 async function runCanvasGenerate(nodeId){
     const node = nodes.find(n => n.id === nodeId);
     if(!node || node.running || cascadeRunningIds.has(nodeId)) return;
-    const order = computeConnectedWorkflowOrder(nodeId);
-    if(order.length > 1){
-        const ctx = beginCascade(nodeId, order, {serial:true, mode:'connected'});
-        refreshNodes(cascadeUiNodeIds(nodeId, order));
-        try {
-            await runOneCascadePass(order, {cascadeTargetId:nodeId});
-            finalizeCascade(nodeId, 'done', {order});
-        } catch(err) {
-            if(isCascadeAbortError(err)){
-                finalizeCascade(nodeId, 'stopped', {order});
-                return;
-            }
-            const failedNodeId = ctx.currentNodeId || order.find(id => nodes.find(n => n.id === id)?.runStatus === 'failed') || nodeId;
-            const failedNode = nodes.find(n => n.id === failedNodeId) || node;
-            failedNode.runStatus = 'failed';
-            failedNode.runError = err.message || String(err);
-            failedNode._cascadeFailed = true;
-            finalizeCascade(nodeId, 'failed', {order});
-        } finally {
-            loopContext = null;
-        }
-        return;
-    }
     return runCascadeNodeByType(node, {cascade:false});
 }
 function computeCascadeOrder(targetId){
@@ -13359,6 +13438,24 @@ minimap?.addEventListener('mousedown', e => {
         scheduleViewportSave();
     };
 });
+function isZoomPreviewIgnoredTarget(target){
+    return !!target?.closest?.('#createMenu, #linkCreateMenu, #nodeInputMenu, #nodeOutputMenu, #imageNodeMenu, .minimap, #canvasAssetPanel, #assetManagerModal, #workflowTransferModal, #logModal, #promptTemplateModal, #imageEditModal, #outputLightbox');
+}
+board.addEventListener('mousedown', e => {
+    if(!zoomPreviewState || e.button !== 0) return;
+    if(isZoomPreviewIgnoredTarget(e.target)) return;
+    e.preventDefault();
+    e.stopPropagation();
+}, true);
+board.addEventListener('click', e => {
+    if(!zoomPreviewState || e.button !== 0) return;
+    if(isZoomPreviewIgnoredTarget(e.target)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const nodeEl = e.target.closest?.('.node');
+    if(nodeEl?.dataset?.id) exitZoomPreviewToNode(nodeEl.dataset.id);
+    else exitZoomPreview(screenToWorld(e.clientX, e.clientY));
+}, true);
 function startBoardPan(e, opts={}){
     if(!canvas) return false;
     if(isEditableTarget(e.target) || e.target.closest?.('#createMenu, #linkCreateMenu, #nodeInputMenu, #nodeOutputMenu, #imageNodeMenu, .minimap')) return false;
@@ -13514,7 +13611,8 @@ window.addEventListener('paste', e => {
 });
 window.addEventListener('keydown', e => {
     if(!canvas) return;
-    if(String(e.key || '').toLowerCase() === 'r' && !isEditableTarget(e.target)) isRKeyDown = true;
+    const key = String(e.key || '').toLowerCase();
+    if(key === 'r' && !isEditableTarget(e.target)) isRKeyDown = true;
     if(e.key === 'Shift' && !isEditableTarget(document.activeElement)) setKnifeMode(true);
     if(e.key === 'Escape' && document.getElementById('imageEditModal').classList.contains('open')) { closeImageEditor(); return; }
     if(e.key === 'Escape' && promptTemplateModal?.classList.contains('open')) { closePromptTemplateModal(); return; }
@@ -13526,8 +13624,20 @@ window.addEventListener('keydown', e => {
         return;
     }
     if(e.key === 'Escape' && outputLightbox.classList.contains('open')) { closeOutputLightbox(); return; }
-    if((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') { e.preventDefault(); groupSelectedImages(); }
-    if((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+    if(!e.ctrlKey && !e.metaKey && !e.altKey && key === 'z' && !isEditableTarget(e.target)
+        && !document.getElementById('imageEditModal')?.classList.contains('open')
+        && !promptTemplateModal?.classList.contains('open')
+        && !outputLightbox.classList.contains('open')
+        && !assetManagerModal?.classList.contains('open')
+        && !workflowTransferModal?.classList.contains('open')
+        && !logModal?.classList.contains('open')){
+        if(e.repeat) return;
+        e.preventDefault();
+        toggleZoomPreview();
+        return;
+    }
+    if((e.ctrlKey || e.metaKey) && key === 'g') { e.preventDefault(); groupSelectedImages(); }
+    if((e.ctrlKey || e.metaKey) && key === 'c') {
         // 在输入框/可编辑元素里时，让浏览器原生 Ctrl+C 工作
         const tag = document.activeElement?.tagName;
         if(tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement?.isContentEditable) return;
@@ -13537,7 +13647,7 @@ window.addEventListener('keydown', e => {
         e.preventDefault();
         copySelectedNodes();
     }
-    if((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+    if((e.ctrlKey || e.metaKey) && key === 'v') {
         const tag = document.activeElement?.tagName;
         if(tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement?.isContentEditable) return;
         if(clipboardNodeCount()) {
@@ -13549,7 +13659,7 @@ window.addEventListener('keydown', e => {
             }, 90);
         }
     }
-    if((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+    if((e.ctrlKey || e.metaKey) && key === 'z') {
         const tag = document.activeElement?.tagName;
         if(tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement?.isContentEditable) return;
         e.preventDefault(); performUndo();

@@ -100,6 +100,8 @@ let mentionSource = 'input';
 let mentionAssetCategoryId = '';
 let assetLibraryUpdatedAt = 0;
 let assetLibraryRefreshTimer = null;
+let activeAssetSmartClassId = '';
+const ASSET_SMART_CATEGORY_PREFIX = '__smart_class__::';
 const PROMPT_PRESETS_KEY = 'smart_canvas_prompt_presets_v1';
 const PROMPT_TEMPLATE_GROUPS_KEY = 'smart_canvas_prompt_template_groups_v1';
 const PROMPT_TEMPLATE_OVERRIDES_KEY = 'smart_canvas_prompt_template_overrides_v1';
@@ -307,7 +309,8 @@ let settings = {
     videoWatermark:false,
     videoCameraFixed:false,
     videoGenerateAudio:false,
-    videoMultimodal:false,
+    videoMultimodal:true,
+    _videoMultimodalUserSet:false,
     videoUseFrameRoles:false,
     videoTrustedAsset:false,
     videoTrustedSource:'library',
@@ -452,6 +455,14 @@ function settingsForStorage(source=settings){
     const clean = cloneSmartSettings(source);
     clean.videoTempShLinks = (clean.videoTempShLinks || []).filter(item => item?.manual === true);
     return clean;
+}
+function normalizeSmartVideoModeSettings(target, preferMultimodal=false){
+    if(!target || typeof target !== 'object') return target;
+    target.videoUseFrameRoles = Boolean(target.videoUseFrameRoles);
+    if(preferMultimodal && !target.videoUseFrameRoles && target._videoMultimodalUserSet !== true) target.videoMultimodal = true;
+    else target.videoMultimodal = Boolean(target.videoMultimodal);
+    if(target.videoUseFrameRoles) target.videoMultimodal = false;
+    return target;
 }
 function isApiLikeEngine(engine){
     return ['api', 'volcengine'].includes(String(engine || '').toLowerCase());
@@ -876,6 +887,7 @@ function smartSettingsForNode(node){
         ...recentSettings,
         ...nodeSettings
     };
+    normalizeSmartVideoModeSettings(base, true);
     return withOutpaintDisplaySettings(node, base);
 }
 function activeSettingsSubject(){
@@ -983,6 +995,8 @@ function nodeScale(node){
 const MEDIA_NODE_DEFAULT_SCALE = 2;
 const MEDIA_GROUP_PREVIOUS_DEFAULT_SCALE = 1.6;
 const MEDIA_GROUP_DEFAULT_SCALE = 0.8;
+const ZOOM_PREVIEW_NODE_DEFAULT_SCALE = 1;
+const ZOOM_PREVIEW_NODE_MAX_SCALE = 1.15;
 const MEDIA_GROUP_THUMB_BASE = 224;
 const MEDIA_GROUP_MAX_VISIBLE_ROWS = 3;
 const EMPTY_UPLOAD_NODE_WIDTH = 316;
@@ -1333,12 +1347,14 @@ function exitZoomPreviewToNode(nodeId){
     const rect = nodeRect(node);
     const cx = rect.x + rect.width / 2;
     const cy = rect.y + rect.height / 2;
+    const fitW = Math.max(1, shell.clientWidth - 160);
+    const fitH = Math.max(1, shell.clientHeight - 160);
     const fitScale = Math.min(
-        1.15,
-        (shell.clientWidth - 160) / Math.max(1, rect.width),
-        (shell.clientHeight - 160) / Math.max(1, rect.height)
+        ZOOM_PREVIEW_NODE_MAX_SCALE,
+        fitW / Math.max(1, rect.width),
+        fitH / Math.max(1, rect.height)
     );
-    const readableScale = Math.min(1.15, Math.max(0.72, fitScale));
+    const readableScale = Math.min(ZOOM_PREVIEW_NODE_MAX_SCALE, Math.max(ZOOM_PREVIEW_NODE_DEFAULT_SCALE, fitScale));
     zoomPreviewState = null;
     shell.classList.remove('zoom-preview');
     viewport.scale = Math.max(safeScale(prev.scale), readableScale);
@@ -2787,7 +2803,8 @@ function smartComfyRandomValue(field){
     const name = `${field.input || ''} ${field.name || ''}`.toLowerCase();
     const looksSeed = name.includes('seed') || name.includes('noise') || name.includes('随机') || name.includes('噪');
     if(min === null) min = looksSeed ? 1 : 0;
-    if(max === null || max <= min) max = looksSeed ? 1000000000000000 : 999999;
+    if(max === null || max <= min) max = looksSeed ? 4294967295 : 999999;
+    if(looksSeed) max = Math.min(max, 4294967295);
     const value = min + Math.random() * (max - min);
     if(isFloat){
         const precision = Math.min(8, Math.max(1, String(field.step).split('.')[1]?.length || 2));
@@ -2801,8 +2818,9 @@ function setDynamicSetting(key, value){
     settings[key] = numericKeys.has(key) && value !== '' ? Number(value) : value;
     if(key === 'provider_id') settings.model = '';
     if(key === 'videoProvider') settings.videoModel = '';
+    if(key === 'videoMultimodal') settings._videoMultimodalUserSet = true;
     if(key === 'videoMultimodal' && settings.videoMultimodal) settings.videoUseFrameRoles = false;
-    if(key === 'videoUseFrameRoles' && settings.videoUseFrameRoles) settings.videoMultimodal = false;
+    normalizeSmartVideoModeSettings(settings, key === 'videoUseFrameRoles');
     if(key === 'comfyMode') applyRecentSmartSettingsForCurrentMode();
     if(key === 'resolution'){
         if(settings.resolution === 'custom') settings.ratio = '';
@@ -2873,8 +2891,9 @@ function bindDynamicParams(){
             event.preventDefault();
             event.stopPropagation();
             settings[btn.dataset.toggleParam] = !settings[btn.dataset.toggleParam];
+            if(btn.dataset.toggleParam === 'videoMultimodal') settings._videoMultimodalUserSet = true;
             if(btn.dataset.toggleParam === 'videoMultimodal' && settings.videoMultimodal) settings.videoUseFrameRoles = false;
-            if(btn.dataset.toggleParam === 'videoUseFrameRoles' && settings.videoUseFrameRoles) settings.videoMultimodal = false;
+            normalizeSmartVideoModeSettings(settings, btn.dataset.toggleParam === 'videoUseFrameRoles');
             persistActiveSmartSettings();
             renderDynamicParams();
             scheduleSave();
@@ -3726,6 +3745,55 @@ function assetCategories(type='image'){
     const library = activeAssetLibrary();
     return (library?.categories || assetLibrary.categories || []).filter(cat => (cat.type || 'image') === type);
 }
+function assetSmartClassKey(entry){
+    if(!entry?.dimension || !entry?.tag) return '';
+    return `${String(entry.dimension)}::${String(entry.tag)}`;
+}
+function assetSmartClassOptionId(entry){
+    const key = assetSmartClassKey(entry);
+    return key ? `${ASSET_SMART_CATEGORY_PREFIX}${key}` : '';
+}
+function parseAssetSmartClassId(id=''){
+    const value = String(id || '');
+    if(!value.startsWith(ASSET_SMART_CATEGORY_PREFIX)) return null;
+    const raw = value.slice(ASSET_SMART_CATEGORY_PREFIX.length);
+    const index = raw.indexOf('::');
+    if(index < 0) return null;
+    return {dimension:raw.slice(0, index), tag:raw.slice(index + 2)};
+}
+function assetSmartClassEntries(){
+    const groups = new Map();
+    assetCategories('image').forEach(cat => {
+        (cat.items || []).forEach(item => {
+            const flat = Array.isArray(item?.classification?.flat) ? item.classification.flat : [];
+            flat.forEach(entry => {
+                const key = assetSmartClassKey(entry);
+                if(!key) return;
+                const prev = groups.get(key) || {
+                    id:assetSmartClassOptionId(entry),
+                    dimension:String(entry.dimension || ''),
+                    label:String(entry.label || entry.dimension || '分类'),
+                    tag:String(entry.tag || ''),
+                    count:0
+                };
+                prev.count += 1;
+                groups.set(key, prev);
+            });
+        });
+    });
+    return [...groups.values()].sort((a, b) => {
+        if(a.label !== b.label) return a.label.localeCompare(b.label, 'zh-CN');
+        return b.count - a.count || a.tag.localeCompare(b.tag, 'zh-CN');
+    });
+}
+function itemsForAssetSmartClass(optionId=''){
+    const parsed = parseAssetSmartClassId(optionId);
+    if(!parsed) return [];
+    return assetCategories('image').flatMap(cat => cat.items || []).filter(item => {
+        const flat = Array.isArray(item?.classification?.flat) ? item.classification.flat : [];
+        return flat.some(entry => String(entry.dimension || '') === parsed.dimension && String(entry.tag || '') === parsed.tag);
+    });
+}
 function workflowAssetCategories(){
     return assetCategories('workflow');
 }
@@ -3748,7 +3816,7 @@ function localAssetFolderCategories(){
         (node.children || []).forEach(walk);
     };
     walk(localAssetLibrary.tree || {id:'__root__', name:'全部上传', items:localAssetLibrary.items || [], children:[]});
-    return result.filter(cat => cat.id === '__root__' || cat.items.length || (localAssetLibrary.tree?.children || []).length);
+    return result;
 }
 function assetLibraryIsLocal(){
     return activeAssetLibraryId === LOCAL_ASSET_LIBRARY_ID;
@@ -3766,6 +3834,7 @@ function activeAssetLibrary(){
 }
 function activeAssetCategory(){
     const cats = assetCategories('image');
+    if(parseAssetSmartClassId(activeAssetCategoryId)) return null;
     if(!cats.length) return null;
     return cats.find(cat => cat.id === activeAssetCategoryId) || cats[0];
 }
@@ -4015,6 +4084,16 @@ function assetMediaKind(item){
     if(/\.(json|zip)$/.test(url) || /\.(json|zip)$/.test(name)) return 'workflow';
     return 'image';
 }
+function assetNodeImageFromItem(item, fallbackName='asset'){
+    const image = {
+        url:item?.url || '',
+        name:item?.name || fallbackName,
+        kind:item?.kind || assetMediaKind(item)
+    };
+    copyMediaSizeFields(item, image);
+    if(item?.asset_uris && typeof item.asset_uris === 'object') image.asset_uris = {...item.asset_uris};
+    return image;
+}
 function assetThumbHtml(item){
     const url = escapeAttr(item.url || '');
     const thumb = item.thumbnail || item.thumb || item.preview || item.url || '';
@@ -4042,32 +4121,43 @@ function renderAssetLibrary(){
     const workflowMode = assetTab === 'workflow';
     assetImageControls.style.display = (imageMode || workflowMode) ? 'block' : 'none';
     const localMode = assetLibraryIsLocal();
-    assetDropZone.style.display = (imageMode && !localMode) ? 'flex' : 'none';
+    assetDropZone.style.display = imageMode ? 'flex' : 'none';
     assetGrid.style.display = (imageMode || workflowMode) ? 'grid' : 'none';
     workflowEmpty.style.display = 'none';
     if(!imageMode && !workflowMode){ refreshIcons(); return; }
-    const cats = workflowMode ? workflowAssetCategories() : assetCategories('image');
+    const baseCats = workflowMode ? workflowAssetCategories() : assetCategories('image');
+    const smartClassCats = imageMode && !localMode ? assetSmartClassEntries().map(entry => ({
+        ...entry,
+        id:entry.id,
+        name:`${entry.label} / ${entry.tag} (${entry.count})`,
+        type:'image',
+        smartClass:true,
+        items:[]
+    })) : [];
+    const cats = workflowMode ? baseCats : [...baseCats, ...smartClassCats];
     const activeCatId = workflowMode ? activeWorkflowAssetCategoryId : activeAssetCategoryId;
     if(workflowMode && !cats.some(cat => cat.id === activeWorkflowAssetCategoryId)) activeWorkflowAssetCategoryId = cats[0]?.id || '';
     if(imageMode && !cats.some(cat => cat.id === activeAssetCategoryId)) activeAssetCategoryId = cats[0]?.id || '';
     assetCategorySelect.innerHTML = cats.map(cat => `<option value="${escapeHtml(cat.id)}" ${cat.id === (workflowMode ? activeWorkflowAssetCategoryId : activeAssetCategoryId) ? 'selected' : ''}>${escapeHtml(cat.name || (workflowMode ? '工作流' : tr('smart.assetFolder')))}</option>`).join('');
     const cat = workflowMode ? activeWorkflowAssetCategory() : activeAssetCategory();
-    const items = cat?.items || [];
-    if(assetAddCategoryBtn) assetAddCategoryBtn.disabled = localMode;
-    if(assetRenameCategoryBtn) assetRenameCategoryBtn.disabled = !cat || localMode;
+    const smartClass = imageMode ? parseAssetSmartClassId(activeAssetCategoryId) : null;
+    const items = smartClass ? itemsForAssetSmartClass(activeAssetCategoryId) : (cat?.items || []);
+    if(assetAddCategoryBtn) assetAddCategoryBtn.disabled = Boolean(smartClass);
+    if(assetRenameCategoryBtn) assetRenameCategoryBtn.disabled = !cat || Boolean(smartClass) || (localMode && (cat.id === '__root__' || !cat.id));
     assetGrid.innerHTML = items.length ? items.map(item => `
         <div class="asset-item ${workflowMode ? 'workflow-asset-item' : ''}" draggable="${workflowMode ? 'false' : 'true'}" data-asset-id="${escapeHtml(item.id)}" data-url="${escapeHtml(item.url)}" data-name="${escapeHtml(item.name || 'asset')}" data-kind="${escapeHtml(assetMediaKind(item))}">
             ${assetThumbHtml(item)}
             <div class="asset-meta">
-                <span class="asset-name" title="${escapeHtml(item.name || '')}">${escapeHtml(item.name || 'asset')}</span>
+                <span class="asset-name" ${localMode ? `data-rename-local-asset="${escapeHtml(item.id)}"` : ''} title="${escapeHtml(item.name || '')}">${escapeHtml(item.name || 'asset')}</span>
                 ${workflowMode
                     ? `<button class="asset-mini-btn" type="button" data-rename-workflow-asset="${escapeHtml(item.id)}" title="${escapeHtml(tr('smart.assetRename'))}"><i data-lucide="pencil"></i></button>
                        <button class="asset-mini-btn" type="button" data-delete-workflow-asset="${escapeHtml(item.id)}" title="${escapeHtml(tr('common.delete'))}"><i data-lucide="trash-2"></i></button>`
-                    : localMode ? `<span class="asset-local-tag">本地</span>` : `<button class="asset-mini-btn" type="button" data-rename-asset="${escapeHtml(item.id)}" title="${escapeHtml(tr('smart.assetRename'))}"><i data-lucide="pencil"></i></button>
+                    : localMode ? `<button class="asset-mini-btn" type="button" data-rename-local-asset="${escapeHtml(item.id)}" title="${escapeHtml(tr('smart.assetRename'))}"><i data-lucide="pencil"></i></button>
+                       <button class="asset-mini-btn" type="button" data-delete-local-asset="${escapeHtml(item.id)}" title="${escapeHtml(tr('common.delete'))}"><i data-lucide="trash-2"></i></button>` : `<button class="asset-mini-btn" type="button" data-rename-asset="${escapeHtml(item.id)}" title="${escapeHtml(tr('smart.assetRename'))}"><i data-lucide="pencil"></i></button>
                        <button class="asset-mini-btn" type="button" data-delete-asset="${escapeHtml(item.id)}" title="${escapeHtml(tr('common.delete'))}"><i data-lucide="trash-2"></i></button>`}
             </div>
         </div>
-    `).join('') : `<div class="asset-empty">${escapeHtml(localMode ? '暂无本地素材，请在素材库管理中上传' : (workflowMode ? '暂无工作流资产' : tr('smart.assetEmpty')))}</div>`;
+    `).join('') : `<div class="asset-empty">${escapeHtml(localMode ? '暂无本地素材，拖入图片即可保存' : (smartClass ? '这个智能分类下暂无素材' : (workflowMode ? '暂无工作流资产' : tr('smart.assetEmpty'))))}</div>`;
     if(workflowMode) bindWorkflowAssetItemEvents();
     else bindAssetItemEvents();
     bindSmartPreviewImageFallbacks(assetGrid);
@@ -4194,8 +4284,34 @@ function beginAssetInlineRename(assetId){
         }
         input.disabled = true;
         try {
-            const data = await fetch(`/api/asset-library/items/${encodeURIComponent(assetId)}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})}).then(r => r.json());
-            setAssetLibraryFromResponse(data);
+            if(assetLibraryIsLocal() || item.file){
+                const data = await fetch('/api/local-assets/items', {
+                    method:'PATCH',
+                    headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({path:item.file || item.id, name})
+                }).then(async r => {
+                    if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '重命名失败');
+                    return r.json();
+                });
+                localAssetLibrary = {items:Array.isArray(data.items) ? data.items : localAssetLibrary.items, tree:data.tree || localAssetLibrary.tree};
+                activeAssetCategoryId = data.item?.folder || activeAssetCategoryId;
+                if(data.old_path && data.item?.url){
+                    const oldUrl = `/assets/uploads/${String(data.old_path).split('/').map(encodeURIComponent).join('/')}`;
+                    nodes.forEach(node => (node.images || []).forEach(img => {
+                        if(img?.url !== oldUrl) return;
+                        img.url = data.item.url;
+                        img.name = data.item.name || img.name;
+                        copyMediaSizeFields(data.item, img);
+                    }));
+                    scheduleSave();
+                }
+                renderAssetLibrary();
+                render();
+                toast('已重命名本地素材，反推提示词和分类索引已同步');
+            } else {
+                const data = await fetch(`/api/asset-library/items/${encodeURIComponent(assetId)}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})}).then(r => r.json());
+                setAssetLibraryFromResponse(data);
+            }
         } catch(err){
             restore();
             toast(err.message || tr('smart.assetAddFail'));
@@ -4225,7 +4341,8 @@ function bindAssetItemEvents(){
         el.addEventListener('dragstart', e => {
             hideAssetHoverPreview();
             e.dataTransfer.effectAllowed = 'copy';
-            e.dataTransfer.setData('application/x-smart-asset', JSON.stringify({url:el.dataset.url, name:el.dataset.name, kind:el.dataset.kind}));
+            const item = (activeAssetCategory()?.items || []).find(x => x.id === el.dataset.assetId);
+            e.dataTransfer.setData('application/x-smart-asset', JSON.stringify(assetNodeImageFromItem(item || {url:el.dataset.url, name:el.dataset.name, kind:el.dataset.kind})));
             e.dataTransfer.setData('text/plain', el.dataset.url || '');
         });
     });
@@ -4233,6 +4350,19 @@ function bindAssetItemEvents(){
         btn.onclick = async e => {
             e.preventDefault(); e.stopPropagation();
             beginAssetInlineRename(btn.dataset.renameAsset);
+        };
+    });
+    assetGrid.querySelectorAll('[data-rename-local-asset]').forEach(btn => {
+        btn.onclick = async e => {
+            e.preventDefault(); e.stopPropagation();
+            beginAssetInlineRename(btn.dataset.renameLocalAsset || '');
+        };
+    });
+    assetGrid.querySelectorAll('[data-delete-local-asset]').forEach(btn => {
+        btn.onclick = async e => {
+            e.preventDefault(); e.stopPropagation();
+            btn.disabled = true;
+            await deleteLocalAssetFromPanel(btn.dataset.deleteLocalAsset || '');
         };
     });
     assetGrid.querySelectorAll('[data-delete-asset]').forEach(btn => {
@@ -4275,7 +4405,7 @@ function bindWorkflowAssetItemEvents(){
     });
 }
 async function addUrlToAssetLibrary(url, name=''){
-    if(assetLibraryIsLocal()){ toast('本地素材请在素材库管理中上传'); return; }
+    if(assetLibraryIsLocal()) return addUrlToLocalAssetLibrary(url, name);
     const cat = activeAssetCategory();
     if(!cat){ toast(tr('smart.assetNoFolder')); return; }
     const data = await fetch('/api/asset-library/items', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library_id:activeAssetLibraryId, category_id:cat.id, url, name})}).then(async r => {
@@ -4284,6 +4414,73 @@ async function addUrlToAssetLibrary(url, name=''){
     });
     setAssetLibraryFromResponse(data);
     toast(tr('smart.assetSaved'));
+}
+function localAssetFolderPath(){
+    const cat = activeAssetCategory();
+    return cat && cat.id !== '__root__' ? (cat.id || '') : '';
+}
+function setLocalAssetLibraryFromResponse(data){
+    localAssetLibrary = {items:Array.isArray(data.items) ? data.items : localAssetLibrary.items, tree:data.tree || localAssetLibrary.tree};
+}
+async function addFilesToLocalAssetLibrary(files=[]){
+    const supported = [...(files || [])].filter(isSupportedUploadFile);
+    if(!supported.length) return [];
+    const form = new FormData();
+    form.append('folder', localAssetFolderPath());
+    supported.forEach(file => form.append('files', file, file.name || 'media'));
+    const data = await fetch('/api/local-assets/upload', {method:'POST', body:form}).then(async r => {
+        if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || tr('smart.assetAddFail'));
+        return r.json();
+    });
+    const localData = await fetch('/api/local-assets').then(r => r.ok ? r.json() : {items:[], tree:null});
+    setLocalAssetLibraryFromResponse(localData);
+    renderAssetLibrary();
+    toast(`已保存 ${data.files?.length || 0} 个本地素材`);
+    return data.files || [];
+}
+async function addLocalPathsToLocalAssetLibrary(paths=[]){
+    const imported = await importSmartLocalImages(paths);
+    return addUrlItemsToLocalAssetLibrary(imported.map(item => ({url:item.url, name:item.name || smartImageNameFromUrl(item.url)})));
+}
+async function addUrlItemsToLocalAssetLibrary(items=[]){
+    const list = (items || []).filter(item => item?.url);
+    if(!list.length) return [];
+    const data = await fetch('/api/local-assets/import-urls', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({folder:localAssetFolderPath(), items:list.map(item => ({url:item.url, name:item.name || smartImageNameFromUrl(item.url)}))})
+    }).then(async r => {
+        if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || tr('smart.assetAddFail'));
+        return r.json();
+    });
+    setLocalAssetLibraryFromResponse(data);
+    renderAssetLibrary();
+    toast(`已保存 ${data.count || 0} 个本地素材`);
+    return data.files || [];
+}
+async function addUrlToLocalAssetLibrary(url, name=''){
+    return addUrlItemsToLocalAssetLibrary([{url, name:name || smartImageNameFromUrl(url)}]);
+}
+async function deleteLocalAssetFromPanel(itemId){
+    const item = (activeAssetCategory()?.items || []).find(x => x.id === itemId)
+        || (localAssetLibrary.items || []).find(x => x.id === itemId || x.file === itemId);
+    if(!item) return;
+    try {
+        const data = await fetch('/api/local-assets/delete', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({names:[item.file || item.id]})
+        }).then(async r => {
+            if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '删除失败');
+            return r.json();
+        });
+        const localData = await fetch('/api/local-assets').then(r => r.ok ? r.json() : {items:[], tree:null});
+        setLocalAssetLibraryFromResponse(localData);
+        renderAssetLibrary();
+        toast(data.deleted?.length ? '已删除本地素材' : '未找到要删除的本地素材');
+    } catch(err){
+        toast(err.message || '删除失败');
+    }
 }
 function canvasImageDragPayload(node, index=0){
     const img = node?.images?.[index];
@@ -4315,6 +4512,10 @@ async function loadCanvas(){
         viewport = {...viewport, ...(canvas.viewport || {})};
         viewport.scale = safeScale(viewport.scale);
         if(canvas.settings) settings = {...settings, ...canvas.settings};
+        normalizeSmartVideoModeSettings(settings, true);
+        nodes.forEach(node => {
+            if(node.runSettings) normalizeSmartVideoModeSettings(node.runSettings, true);
+        });
         canvasDefaultSmartSettings = cloneSmartSettings(settings);
         loadRecentSmartSettings();
         if(settings.comfy_workflow && !settings.comfyWorkflow) settings.comfyWorkflow = settings.comfy_workflow;
@@ -4537,7 +4738,7 @@ function pasteAssetsFromInbox(){
     items.forEach((it, i) => {
         const r = Math.floor(i / cols), c = i % cols;
         const p = {x: startX + c * cell, y: startY + r * cell};
-        const node = createImageNodeAt(p, [{url: it.url, name: it.name || 'asset', kind: it.kind || assetMediaKind(it)}], {skipUndo:true, select:false});
+        const node = createImageNodeAt(p, [assetNodeImageFromItem(it)], {skipUndo:true, select:false});
         if(node) created.push(node.id);
     });
     selectedId = created.length === 1 ? created[0] : '';
@@ -9859,6 +10060,10 @@ function smartLoopPreviewImages(node){
 }
 function outputImagesForNode(node, consume=false, ctx=smartLoopContext){
     if(node?.type === 'smart-loop') return smartLoopInputImages(node, ctx);
+    const roundOutputs = ctx?.roundOutputs;
+    if(node?.id && roundOutputs && typeof roundOutputs.get === 'function' && roundOutputs.has(node.id)){
+        return (roundOutputs.get(node.id) || []).filter(img => img?.url);
+    }
     return imagesForNode(node).filter(img => img?.url);
 }
 function selfReferenceImagesForNode(node, consume=false, ctx=smartLoopContext){
@@ -9894,6 +10099,12 @@ function inputImagesFor(node, consume=false, ctx=smartLoopContext){
 }
 function workflowInputImagesFor(node, consume=false, ctx=smartLoopContext){
     return workflowInputNodesFor(node).flatMap(input => outputImagesForNode(input, consume, ctx));
+}
+function rememberRoundOutputs(ctx, node, outputs){
+    if(!ctx || !node?.id || !Array.isArray(outputs)) return outputs || [];
+    if(!ctx.roundOutputs || typeof ctx.roundOutputs.set !== 'function') ctx.roundOutputs = new Map();
+    ctx.roundOutputs.set(node.id, outputs.filter(img => img?.url).map(img => ({...img})));
+    return outputs;
 }
 function inputRefKey(img){
     if(!img?.url) return '';
@@ -11051,6 +11262,27 @@ function appendOutputsToNode(node, additions, kind='image', options={}){
     if(!skipShift) pushRightSideNodes(node, afterRight - beforeRight + 36);
     return next;
 }
+function appendLoopOutputsToNode(node, additions, kind='image', ctx=smartLoopContext){
+    if(!node || !additions?.length) return [];
+    const runState = ctx?.runState;
+    if(runState && !runState.loopAppendInitialized) runState.loopAppendInitialized = new Set();
+    const initialized = runState?.loopAppendInitialized;
+    if(initialized && !initialized.has(node.id)){
+        initialized.add(node.id);
+        const existing = cleanHistoryImages(node.images || []);
+        if(existing.length){
+            const history = ensureHistoryGroupForNode(node);
+            history.images = cleanHistoryImages([...existing, ...(history.images || [])]);
+            history.title = '历史分组';
+            history.outputKind = kind;
+            history.scale = MEDIA_GROUP_DEFAULT_SCALE;
+            delete history.w;
+            delete history.h;
+        }
+        node.images = [];
+    }
+    return appendOutputsToNode(node, additions, kind, {skipShift:true});
+}
 function syncCascadeRunButton(node=selectedNode()){
     if(!cascadeRunBtn) return;
     const visible = canRunSmartCascade(node);
@@ -11321,7 +11553,11 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
             const url = typeof item === 'string' ? item : item?.url || '';
             return stripImageGenerationMeta(copyMediaSizeFields(item, {url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:(typeof item === 'object' && item.kind) || result.kind, generatedResult:true}));
         }).filter(item => item.url);
-        replaceOutputsToNodeWithHistory(outputNode, additions, result.kind, null, {skipShift:Boolean(ctx?.nodeId)});
+        if(ctx?.appendLoopOutputs) {
+            appendLoopOutputsToNode(outputNode, additions, result.kind, ctx);
+        } else {
+            replaceOutputsToNodeWithHistory(outputNode, additions, result.kind, null, {skipShift:Boolean(ctx?.nodeId)});
+        }
         outputNode.runPrompt = targetPromptState.runPrompt;
         outputNode.runModelPrompt = targetPromptState.runModelPrompt;
         outputNode.runPromptRefs = targetPromptState.runPromptRefs || [];
@@ -11338,7 +11574,7 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
         });
         settings = previousSettings;
         render();
-        return additions;
+        return rememberRoundOutputs(ctx, outputNode, additions);
     } catch(e) {
         settings = previousSettings;
         if(handleJimengPendingSignal(outputNode, e)){
@@ -11441,7 +11677,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
             refreshConnectionLayer();
         }
         addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind}, outputs:result.urls, runMs:nowMs() - runLogStart});
-        return additions;
+        return rememberRoundOutputs(ctx, outputSlot, additions);
     } catch(e) {
         if(handleJimengPendingSignal(outputSlot, e)){
             outputSlot.queued = false;
@@ -11467,7 +11703,7 @@ function appendCascadeRefsToReceiver(node, refs, ctx=smartLoopContext){
     if(!additions.length) return [];
     replaceOutputsToNodeWithHistory(node, additions, mediaKindForUrls(additions, additions.some(isVideoMediaItem) ? 'video' : 'image'), null, {skipShift:Boolean(ctx?.nodeId)});
     render();
-    return additions;
+    return rememberRoundOutputs(ctx, node, additions);
 }
 function cascadeRefsFromOutputs(outputs, targetNode){
     return (outputs || []).filter(img => img?.url).map((img, index) => ({
@@ -11589,7 +11825,9 @@ async function runSmartCascade(targetNode=null){
     try {
         const runRound = async (loopIndex=startIndex, options={}) => {
             throwIfSmartCascadeStopRequested(runState);
-            const ctx = loop ? {index:loopIndex, total:endIndex, nodeId:loop.node.id, forceWorkflow:chain.length > 1 && !singleNodeLoopRun, runState} : {runState};
+            const ctx = loop
+                ? {index:loopIndex, total:endIndex, nodeId:loop.node.id, forceWorkflow:chain.length > 1 && !singleNodeLoopRun, runState, roundOutputs:new Map()}
+                : {runState, roundOutputs:new Map()};
             if(parallelLimit === 1) smartLoopContext = ctx;
             if(singleNodeLoopRun){
                 const refs = refsForDirectLoopRound(loop.node, loopIndex, endIndex);
@@ -11635,12 +11873,14 @@ async function runSmartCascade(targetNode=null){
                     const target = targets[index];
                     const edgeKey = `${source.id}->${target.id}`;
                     let outputs = [];
+                    const targetChildren = (graph.children.get(target.id) || []).filter(child => child && child.type !== 'smart-loop');
+                    const targetIsLeaf = target.type !== 'smart-loop' && targetChildren.length === 0;
                     const relayLoops = isSmartImageNode(source) && isSmartImageNode(target)
                         ? relayLoopPromptNodesForEdge(source, target)
                         : [];
                     const stepCtx = relayLoops.length && isSmartImageNode(target)
-                        ? {...(ctx || {}), relayPromptNodeIds:[...new Set([...(ctx?.relayPromptNodeIds || []), ...relayLoops.map(n => n.id)])]}
-                        : ctx;
+                        ? {...(ctx || {}), appendLoopOutputs:Boolean(ctx?.nodeId && targetIsLeaf), relayPromptNodeIds:[...new Set([...(ctx?.relayPromptNodeIds || []), ...relayLoops.map(n => n.id)])]}
+                        : {...(ctx || {}), appendLoopOutputs:Boolean(ctx?.nodeId && targetIsLeaf)};
                     try {
                         if(runState.runPath && relayLoops.length && source?.id && isSmartImageNode(target)){
                             relayLoops.forEach(loopNode => {
@@ -13168,7 +13408,7 @@ shell.ondrop = async e => {
             const asset = JSON.parse(assetRaw);
             if(asset?.url) {
                 pushUndo();
-                createImageNodeAt(p, [{url:asset.url, name:asset.name || 'asset', kind:asset.kind || assetMediaKind(asset)}], {skipUndo:true});
+                createImageNodeAt(p, [assetNodeImageFromItem(asset)], {skipUndo:true});
             }
             return;
         } catch {}
@@ -13571,21 +13811,47 @@ if(assetCategorySelect) assetCategorySelect.onchange = () => {
     renderAssetLibrary();
 };
 if(assetAddCategoryBtn) assetAddCategoryBtn.onclick = async () => {
-    if(assetLibraryIsLocal()){ toast('本地素材请在素材库管理中管理文件夹'); return; }
     const workflowMode = currentAssetTabIsWorkflow();
     const fallbackName = workflowMode ? '工作流' : tr('smart.assetFolder');
     const name = await openAssetNameDialog({title:tr('smart.assetNewFolder'), value:fallbackName, placeholder:fallbackName});
     if(!name) return;
+    if(assetLibraryIsLocal()){
+        const data = await fetch('/api/local-assets/folders', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({parent:localAssetFolderPath(), name})
+        }).then(async r => {
+            if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '新建文件夹失败');
+            return r.json();
+        });
+        setLocalAssetLibraryFromResponse(data);
+        activeAssetCategoryId = data.folder?.path || activeAssetCategoryId;
+        renderAssetLibrary();
+        return;
+    }
     const data = await fetch('/api/asset-library/categories', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library_id:activeAssetLibraryId, name, type:workflowMode ? 'workflow' : 'image'})}).then(r => r.json());
     setActiveAssetTabCategory(data.category?.id || '');
     setAssetLibraryFromResponse(data);
 };
 if(assetRenameCategoryBtn) assetRenameCategoryBtn.onclick = async () => {
-    if(assetLibraryIsLocal()){ toast('本地素材请在素材库管理中管理文件夹'); return; }
     const cat = activeAssetTabCategory();
     if(!cat) return;
     const name = await openAssetNameDialog({title:tr('smart.assetRenameFolder'), value:cat.name || '', placeholder:currentAssetTabIsWorkflow() ? '工作流' : tr('smart.assetFolder')});
     if(!name) return;
+    if(assetLibraryIsLocal()){
+        const data = await fetch('/api/local-assets/folders', {
+            method:'PATCH',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({path:cat.id || '', name})
+        }).then(async r => {
+            if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '重命名文件夹失败');
+            return r.json();
+        });
+        setLocalAssetLibraryFromResponse(data);
+        activeAssetCategoryId = data.folder?.path || activeAssetCategoryId;
+        renderAssetLibrary();
+        return;
+    }
     const data = await fetch(`/api/asset-library/categories/${encodeURIComponent(cat.id)}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})}).then(r => r.json());
     setAssetLibraryFromResponse(data);
 };
@@ -13624,11 +13890,17 @@ async function handleAssetPanelDrop(e){
     try {
         const payload = await resolveSmartImageDropPayload(e.dataTransfer);
         if(payload.type === 'files') {
-            const uploaded = await uploadFiles(payload.files);
-            for(const file of uploaded) if(file?.url) await addUrlToAssetLibrary(file.url, file.name || '');
+            if(assetLibraryIsLocal()) await addFilesToLocalAssetLibrary(payload.files);
+            else {
+                const uploaded = await uploadFiles(payload.files);
+                for(const file of uploaded) if(file?.url) await addUrlToAssetLibrary(file.url, file.name || '');
+            }
         } else if(payload.type === 'localPaths') {
-            const imported = await importSmartLocalImages(payload.localPaths);
-            for(const file of imported) if(file?.url) await addUrlToAssetLibrary(file.url, file.name || '');
+            if(assetLibraryIsLocal()) await addLocalPathsToLocalAssetLibrary(payload.localPaths);
+            else {
+                const imported = await importSmartLocalImages(payload.localPaths);
+                for(const file of imported) if(file?.url) await addUrlToAssetLibrary(file.url, file.name || '');
+            }
         } else if(payload.type === 'url') {
             await addUrlToAssetLibrary(payload.url, smartImageNameFromUrl(payload.url));
         }

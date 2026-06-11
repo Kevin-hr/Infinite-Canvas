@@ -165,6 +165,8 @@ body.studio-theme-dark .canvas-meta-pop .emoji-option:hover { background:#263449
     .workflow-transfer-panel { right:14px; top:66px; bottom:auto; width:calc(100vw - 28px); max-height:calc(100vh - 96px); }
 }
 .board { position:absolute; inset:0; cursor:grab; background-color:var(--page); background-image:radial-gradient(var(--grid) 1px, transparent 1px); background-size:24px 24px; }
+.shell.zoom-preview .board,
+body.canvas-zoom-preview .node { cursor:crosshair !important; }
 body.canvas-knife .board,
 body.canvas-knife .node,
 body.canvas-knife .link-hit { cursor:crosshair !important; }

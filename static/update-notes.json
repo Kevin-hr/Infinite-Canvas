@@ -1,14 +1,22 @@
 {
   "version": "2026.06.10.1",
-  "updated_at": "2026-06-10T15:42:04+08:00",
+  "updated_at": "2026-06-11T18:50:36+08:00",
   "items": [
     {
       "type": "feature",
-      "text": "支持 Agnes 图像/视频/LLM生成"
+      "text": "优化资产库管理页面的本地素材，支持智能分类"
     },
     {
       "type": "feature",
-      "text": "画布首次打开加载低分辨率缩略图和视频缩略图，极大提升了流畅度"
+      "text": "tools文件夹更新了chrome的图像/视频采集工具"
+    },
+    {
+      "type": "feature",
+      "text": "图像采集工具可以直接导入本地资产库，并且智能分类"
+    },
+    {
+      "type": "feature",
+      "text": "修复了runninghub的一些bug"
     }
   ]
 }

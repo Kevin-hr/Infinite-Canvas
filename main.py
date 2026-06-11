@@ -353,7 +353,7 @@ RUNNINGHUB_DEFAULT_APPS = [
                 "id": "14::seed",
                 "nodeId": "14",
                 "fieldName": "seed",
-                "fieldValue": "554049736557817",
+                "fieldValue": "3250470112",
                 "fieldType": "INT",
                 "label": "seed",
                 "enabled": True,
@@ -362,9 +362,9 @@ RUNNINGHUB_DEFAULT_APPS = [
                 "note": "seed",
                 "options": [],
                 "random_enabled": True,
-                "min": "",
-                "max": "",
-                "step": "",
+                "min": "1",
+                "max": "4294967295",
+                "step": "1",
                 "imageOrder": 0,
                 "required": False,
             },
@@ -938,25 +938,17 @@ def apply_runninghub_system_thumbnails(entries, kind):
     return result
 
 def merge_runninghub_entry_overlay(system_entry, user_entry):
-    # 用户条目优先，但当它把 fields/workflowJson 留空（例如配置前生成的空壳）时，
-    # 继承系统模板里的完整配置，否则模板里的必选/可选等设置会被空壳覆盖丢失。
+    # 同 ID 的系统模板条目由模板主导：后续维护只更新 static/runninghub/api_providers.json 即可。
+    # 用户侧只保留启用/隐藏等管理状态；自定义新增条目不受影响。
     if not isinstance(system_entry, dict):
         return user_entry
     if not isinstance(user_entry, dict):
         return system_entry
-    merged = dict(user_entry)
-    user_fields = user_entry.get("fields")
-    sys_fields = system_entry.get("fields")
-    if not (isinstance(user_fields, list) and user_fields) and isinstance(sys_fields, list) and sys_fields:
-        merged["fields"] = sys_fields
-    user_wj = user_entry.get("workflowJson")
-    sys_wj = system_entry.get("workflowJson")
-    if not (isinstance(user_wj, dict) and user_wj) and isinstance(sys_wj, dict) and sys_wj:
-        merged["workflowJson"] = sys_wj
-    if not user_entry.get("optionalImageMode") and system_entry.get("optionalImageMode"):
-        merged["optionalImageMode"] = system_entry["optionalImageMode"]
-    if not (isinstance(user_entry.get("raw"), dict) and user_entry.get("raw")) and isinstance(system_entry.get("raw"), dict) and system_entry.get("raw"):
-        merged["raw"] = system_entry["raw"]
+    merged = dict(system_entry)
+    if "enabled" in user_entry:
+        merged["enabled"] = bool(user_entry.get("enabled", True))
+    if user_entry.get("hidden") is True:
+        merged["hidden"] = True
     return merged
 
 def merge_runninghub_system_entries(system_entries, user_entries, kind):
@@ -2526,8 +2518,32 @@ class LocalAssetCaptionSaveRequest(BaseModel):
     name: str = ""
     caption: str = ""
 
+class LocalAssetClassifyRequest(BaseModel):
+    names: List[str] = []
+    provider: str = "comfly"
+    model: str = ""
+    ms_model: str = ""
+    prompt: str = ""
+
+class LocalAssetUrlImportItem(BaseModel):
+    url: str = ""
+    name: str = ""
+
+class LocalAssetUrlImportRequest(BaseModel):
+    items: List[LocalAssetUrlImportItem] = []
+    folder: str = ""
+    classify: bool = False
+    provider: str = "comfly"
+    model: str = ""
+    ms_model: str = ""
+    prompt: str = ""
+
 class LocalAssetFolderRequest(BaseModel):
     parent: str = ""
+    path: str = ""
+    name: str = ""
+
+class LocalAssetRenameRequest(BaseModel):
     path: str = ""
     name: str = ""
 
@@ -2586,6 +2602,14 @@ class AssetAvatarRegisterRequest(BaseModel):
     provider_id: str = ""
     project_name: str = "default"
     group_name: str = ""
+
+class AssetLibraryClassifyRequest(BaseModel):
+    library_id: str = ""
+    ids: List[str] = []
+    provider: str = "comfly"
+    model: str = ""
+    ms_model: str = ""
+    prompt: str = ""
 
 class PromptLibraryRequest(BaseModel):
     name: str = "提示词库"
@@ -4778,6 +4802,167 @@ def make_asset_library_item(src: str, name: str = "", subdir: str = "") -> Tuple
     }
     return dest_name, item
     return lib
+
+ASSET_CLASSIFICATION_PROMPT = """请识别这张图片，输出严格 JSON，不要 Markdown，不要解释。
+目标是给素材库做非常全面的筛选分类。所有字段都用中文短标签数组，尽量具体但不要虚构。
+JSON 结构：
+{
+  "summary": "一句话描述",
+  "categories": {
+    "environment": ["室内/室外/自然/城市/棚拍/商业空间等环境大类"],
+    "scene": ["室内/室外/棚拍/街景/自然/商业空间等"],
+    "space": ["卧室/餐厅/客厅/厨房/浴室/办公室/店铺/展厅/户外道路等"],
+    "subject": ["人物/模特/产品/家具/建筑/食物/动物/车辆/植物等"],
+    "model": ["无人/单人模特/多人模特/男性模特/女性模特/儿童模特/半身模特/全身模特/手部模特等"],
+    "people": ["无人/单人/多人/男性/女性/儿童/半身/全身/手部特写等"],
+    "style": ["写实/摄影/插画/3D/极简/奢华/复古/现代/电商/电影感等"],
+    "lighting": ["自然光/硬光/柔光/逆光/侧光/夜景/暖光/冷光/高对比/低对比等"],
+    "color": ["白色/黑色/暖色/冷色/高饱和/低饱和/莫兰迪/金属色等"],
+    "composition": ["近景/中景/远景/俯拍/仰拍/正面/侧面/居中/留白/对称/特写等"],
+    "mood": ["温馨/高级/清爽/科技/自然/浪漫/神秘/活力/安静等"],
+    "use_case": ["广告/电商主图/海报/社媒/样机/参考图/背景/角色参考/空间参考等"],
+    "objects": ["画面中重要物体"],
+    "materials": ["木材/金属/玻璃/布料/皮革/石材/陶瓷等"],
+    "quality": ["高清/模糊/低清/噪点/水印/截图/透明背景等"]
+  },
+  "tags": ["综合关键词，20个以内"]
+}
+要求：只返回可解析 JSON；每个数组最多 8 项；如果不确定就省略该标签。"""
+
+ASSET_CLASSIFICATION_DIMENSION_NAMES = {
+    "environment": "环境",
+    "scene": "场景",
+    "space": "空间",
+    "subject": "主体",
+    "model": "模特",
+    "people": "人物",
+    "style": "风格",
+    "lighting": "光影",
+    "color": "色彩",
+    "composition": "构图",
+    "mood": "氛围",
+    "use_case": "用途",
+    "objects": "物体",
+    "materials": "材质",
+    "quality": "质量",
+}
+
+def _local_upload_classification_path(filename):
+    return os.path.splitext(os.path.join(LOCAL_UPLOAD_DIR, filename))[0] + ".classification.json"
+
+def _safe_asset_tag(value, limit=24):
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    text = re.sub(r"^[#＃]+", "", text).strip(" ,，、;；|/")
+    return text[:limit]
+
+def normalize_asset_classification(raw):
+    if not isinstance(raw, dict):
+        raw = {}
+    categories = raw.get("categories") if isinstance(raw.get("categories"), dict) else {}
+    clean_categories = {}
+    flat = []
+    for key, values in categories.items():
+        norm_key = re.sub(r"[^A-Za-z0-9_-]+", "_", str(key or "").strip().lower())[:40]
+        if not norm_key:
+            continue
+        if isinstance(values, str):
+            values = re.split(r"[,，、/|;；\n]+", values)
+        if not isinstance(values, list):
+            continue
+        clean_values = []
+        seen = set()
+        for value in values:
+            tag = _safe_asset_tag(value)
+            if not tag or tag in seen:
+                continue
+            seen.add(tag)
+            clean_values.append(tag)
+            flat.append({"dimension": norm_key, "label": ASSET_CLASSIFICATION_DIMENSION_NAMES.get(norm_key, norm_key), "tag": tag})
+            if len(clean_values) >= 8:
+                break
+        if clean_values:
+            clean_categories[norm_key] = clean_values
+    tags = raw.get("tags") if isinstance(raw.get("tags"), list) else []
+    clean_tags = []
+    seen_tags = set()
+    for value in tags:
+        tag = _safe_asset_tag(value)
+        if not tag or tag in seen_tags:
+            continue
+        seen_tags.add(tag)
+        clean_tags.append(tag)
+        flat.append({"dimension": "tags", "label": "标签", "tag": tag})
+        if len(clean_tags) >= 20:
+            break
+    seen_flat = set()
+    flat_unique = []
+    for item in flat:
+        key = f"{item['dimension']}::{item['tag']}"
+        if key in seen_flat:
+            continue
+        seen_flat.add(key)
+        flat_unique.append(item)
+    return {
+        "summary": str(raw.get("summary") or "").strip()[:240],
+        "categories": clean_categories,
+        "tags": clean_tags,
+        "flat": flat_unique,
+        "updated_at": now_ms(),
+    }
+
+def parse_asset_classification_text(text):
+    value = str(text or "").strip()
+    if not value:
+        return normalize_asset_classification({})
+    value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.IGNORECASE).strip()
+    value = re.sub(r"\s*```$", "", value).strip()
+    try:
+        data = json.loads(value)
+    except Exception:
+        match = re.search(r"\{.*\}", value, re.S)
+        data = json.loads(match.group(0)) if match else {}
+    return normalize_asset_classification(data)
+
+def _read_local_upload_classification(filename):
+    path = _local_upload_classification_path(filename)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return normalize_asset_classification(json.load(f))
+    except Exception:
+        return None
+
+def _write_local_upload_classification(filename, classification):
+    path = _local_upload_classification_path(filename)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(normalize_asset_classification(classification), f, ensure_ascii=False, indent=2)
+
+def asset_classification_prompt(extra_prompt=""):
+    extra = str(extra_prompt or "").strip()
+    if not extra:
+        return ASSET_CLASSIFICATION_PROMPT
+    return ASSET_CLASSIFICATION_PROMPT + "\n\n用户补充分类要求：\n" + extra[:4000]
+
+async def classify_image_with_provider(abs_path, provider_id="", model="", ms_model="", prompt=""):
+    text, resolved_model = await caption_image_with_provider(
+        abs_path,
+        asset_classification_prompt(prompt),
+        provider_id or get_primary_provider_id(),
+        model,
+        ms_model,
+    )
+    classification = parse_asset_classification_text(text)
+    classification["model"] = resolved_model
+    classification["provider"] = provider_id or get_primary_provider_id()
+    return classification
+
+async def classify_asset_image_best_effort(abs_path, provider_id="", model="", ms_model="", prompt=""):
+    try:
+        return await classify_image_with_provider(abs_path, provider_id, model, ms_model, prompt)
+    except Exception as exc:
+        print(f"素材智能分类失败: {exc}")
+        return None
 
 def migrate_asset_library_into_dirs():
     """一次性整理：给所有图片分组（含默认的角色/场景）补上真实文件夹，并把仍在 library/ 根目录的
@@ -7170,6 +7355,53 @@ def rh_default_value(field):
         return ""
     return str(value)
 
+SEED_UINT32_MAX = 4294967295
+
+def rh_is_seed_like_name(*parts) -> bool:
+    text = " ".join(str(part or "") for part in parts).lower()
+    return any(key in text for key in ("seed", "noise", "随机", "种子", "噪"))
+
+def normalize_seed_uint32(value):
+    try:
+        if isinstance(value, bool):
+            return value
+        raw = str(value).strip()
+        if not raw:
+            return value
+        num = int(float(raw))
+    except Exception:
+        return value
+    if 0 <= num <= SEED_UINT32_MAX:
+        return value
+    safe = ((abs(num) - 1) % SEED_UINT32_MAX) + 1
+    return str(safe) if isinstance(value, str) else safe
+
+def sanitize_seed_like_workflow_values(value, parent_key=""):
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if rh_is_seed_like_name(key) and not isinstance(item, (dict, list)):
+                result[key] = normalize_seed_uint32(item)
+            else:
+                result[key] = sanitize_seed_like_workflow_values(item, key)
+        return result
+    if isinstance(value, list):
+        return [sanitize_seed_like_workflow_values(item, parent_key) for item in value]
+    if rh_is_seed_like_name(parent_key):
+        return normalize_seed_uint32(value)
+    return value
+
+def sanitize_runninghub_node_info_list(items):
+    result = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        clean = dict(item)
+        if rh_is_seed_like_name(clean.get("fieldName"), clean.get("label"), clean.get("note")):
+            clean["fieldValue"] = normalize_seed_uint32(clean.get("fieldValue"))
+        result.append(clean)
+    return result
+
 def rh_random_field_value(field):
     def _num(raw, default):
         try:
@@ -7179,8 +7411,12 @@ def rh_random_field_value(field):
             return float(s)
         except Exception:
             return default
+    looks_seed = rh_is_seed_like_name((field or {}).get("fieldName"), (field or {}).get("label"), (field or {}).get("note"))
     lo = _num((field or {}).get("min"), 0.0)
-    hi = _num((field or {}).get("max"), 4294967295.0)
+    hi = _num((field or {}).get("max"), float(SEED_UINT32_MAX) if looks_seed else 999999.0)
+    if looks_seed:
+        hi = min(hi, float(SEED_UINT32_MAX))
+        lo = max(0.0, min(lo, hi))
     if hi < lo:
         lo, hi = hi, lo
     step = _num((field or {}).get("step"), 1.0)
@@ -7205,7 +7441,7 @@ def runninghub_entry_config_from_model(provider, model):
         key = runninghub_workflow_store_key(entry_id)
         with RUNNINGHUB_WORKFLOW_LOCK:
             store = load_runninghub_workflow_store()
-        cfg = runninghub_select_workflow_config(store.get(key), runninghub_provider_workflow_config(key))
+        cfg = runninghub_select_workflow_config(store.get(key), runninghub_provider_workflow_config(key), key)
         if not isinstance(cfg, dict):
             # 退回到 provider 列表中的内联条目
             entry = next(
@@ -7946,6 +8182,14 @@ def _local_upload_safe_folder_name(name):
         raise HTTPException(status_code=400, detail="文件夹名称不能为空")
     return cleaned[:60]
 
+def _local_upload_safe_file_stem(name):
+    raw = os.path.splitext(os.path.basename(str(name or "").strip()))[0]
+    cleaned = sanitize_asset_name(raw, "")
+    cleaned = re.sub(r"[\\/]+", "_", cleaned).strip(" ._")
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="文件名称不能为空")
+    return cleaned[:120]
+
 def _local_upload_caption_path(filename):
     return os.path.splitext(os.path.join(LOCAL_UPLOAD_DIR, filename))[0] + ".txt"
 
@@ -7985,9 +8229,18 @@ def _local_upload_item(filename):
         "folder": os.path.dirname(rel).replace("\\", "/"),
     }
     if kind == "image":
+        try:
+            with Image.open(path) as img:
+                item["natural_w"], item["natural_h"] = img.size
+                item["width"], item["height"] = img.size
+        except Exception:
+            pass
         caption, caption_file = _read_local_upload_caption(filename)
         item["caption"] = caption
         item["caption_file"] = caption_file
+        classification = _read_local_upload_classification(filename)
+        if classification:
+            item["classification"] = classification
     return item
 
 def _local_upload_folder_node(path="", name="全部上传"):
@@ -8058,8 +8311,60 @@ async def upload_local_assets(files: List[UploadFile] = File(...), folder: str =
         path = os.path.join(folder_abs, filename)
         with open(path, "wb") as f:
             f.write(content)
+        if kind == "image":
+            classification = await classify_asset_image_best_effort(path)
+            if classification:
+                _write_local_upload_classification(rel_name, classification)
         uploaded.append(_local_upload_item(rel_name))
     return {"files": uploaded}
+
+@app.post("/api/local-assets/import-urls")
+async def import_local_assets_from_urls(payload: LocalAssetUrlImportRequest):
+    uploaded = []
+    results = []
+    folder_rel, folder_abs = _local_upload_safe_folder(payload.folder)
+    os.makedirs(folder_abs, exist_ok=True)
+    timeout = httpx.Timeout(connect=20.0, read=120.0, write=30.0, pool=20.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers={"User-Agent": "Infinite-Canvas-Asset-Importer/1.0"}) as client:
+        for entry in (payload.items or [])[:200]:
+            src_url = str(entry.url or "").strip()
+            result = {"url": src_url, "ok": False, "file": "", "error": ""}
+            if not src_url.startswith(("http://", "https://")):
+                result["error"] = "仅支持 http(s) 素材地址"
+                results.append(result)
+                continue
+            try:
+                response = await client.get(src_url)
+                response.raise_for_status()
+                content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+                kind, ext = _local_upload_kind_ext(urllib.parse.urlparse(src_url).path, content_type)
+                if kind not in ("image", "video"):
+                    raise HTTPException(status_code=400, detail=f"不是图片或视频资源：{content_type or src_url}")
+                content = response.content
+                if not content:
+                    raise HTTPException(status_code=400, detail="素材内容为空")
+                base = os.path.splitext(os.path.basename(urllib.parse.unquote(urllib.parse.urlparse(src_url).path)))[0]
+                base = entry.name or base or ("web-video" if kind == "video" else "web-image")
+                base = re.sub(r"[^0-9A-Za-z一-鿿._-]+", "_", base).strip("_") or ("web-video" if kind == "video" else "web-image")
+                base = base[:60]
+                filename = f"up_{uuid.uuid4().hex[:12]}_{base}{ext}"
+                rel_name = f"{folder_rel}/{filename}".lstrip("/")
+                path = os.path.join(folder_abs, filename)
+                with open(path, "wb") as f:
+                    f.write(content)
+                if payload.classify and kind == "image":
+                    classification = await classify_asset_image_best_effort(path, payload.provider, payload.model, payload.ms_model, payload.prompt)
+                    if classification:
+                        _write_local_upload_classification(rel_name, classification)
+                item = _local_upload_item(rel_name)
+                uploaded.append(item)
+                result.update({"ok": True, "file": rel_name, "item": item})
+            except HTTPException as exc:
+                result["error"] = str(exc.detail or "导入失败")
+            except Exception as exc:
+                result["error"] = str(exc) or "导入失败"
+            results.append(result)
+    return {"ok": True, "count": len(uploaded), "files": uploaded, "items": results}
 
 @app.get("/api/local-assets")
 async def list_local_assets():
@@ -8099,6 +8404,37 @@ async def rename_local_asset_folder(payload: LocalAssetFolderRequest, request: R
     tree, items = _local_upload_tree_and_items()
     return {"ok": True, "folder": {"path": new_rel, "name": name}, "tree": tree, "items": items}
 
+@app.patch("/api/local-assets/items")
+async def rename_local_asset_item(payload: LocalAssetRenameRequest, request: Request):
+    ensure_same_origin_request(request)
+    rel, abs_path = _local_upload_safe_path(payload.path)
+    if not os.path.isfile(abs_path):
+        raise HTTPException(status_code=404, detail="本地素材不存在")
+    kind, ext = _local_upload_kind_ext(rel, "")
+    if kind is None:
+        raise HTTPException(status_code=400, detail="不支持的素材类型")
+    new_stem = _local_upload_safe_file_stem(payload.name)
+    old_ext = os.path.splitext(rel)[1] or ext
+    parent = os.path.dirname(rel).replace("\\", "/")
+    new_rel = f"{parent}/{new_stem}{old_ext}".lstrip("/")
+    if new_rel == rel:
+        tree, items = _local_upload_tree_and_items()
+        return {"ok": True, "item": _local_upload_item(rel), "tree": tree, "items": items}
+    _, new_abs = _local_upload_abs(new_rel)
+    if os.path.exists(new_abs):
+        raise HTTPException(status_code=400, detail="同名素材已存在")
+    os.rename(abs_path, new_abs)
+    old_caption = _local_upload_caption_path(rel)
+    new_caption = _local_upload_caption_path(new_rel)
+    if os.path.isfile(old_caption) and not os.path.exists(new_caption):
+        os.rename(old_caption, new_caption)
+    old_classification = _local_upload_classification_path(rel)
+    new_classification = _local_upload_classification_path(new_rel)
+    if os.path.isfile(old_classification) and not os.path.exists(new_classification):
+        os.rename(old_classification, new_classification)
+    tree, items = _local_upload_tree_and_items()
+    return {"ok": True, "item": _local_upload_item(new_rel), "old_path": rel, "tree": tree, "items": items}
+
 @app.post("/api/local-assets/delete")
 async def delete_local_assets(payload: dict, request: Request):
     ensure_same_origin_request(request)
@@ -8117,6 +8453,9 @@ async def delete_local_assets(payload: dict, request: Request):
                 txt_path = _local_upload_caption_path(rel)
                 if os.path.isfile(txt_path):
                     os.remove(txt_path)
+                cls_path = _local_upload_classification_path(rel)
+                if os.path.isfile(cls_path):
+                    os.remove(cls_path)
                 deleted.append(rel)
             except OSError:
                 pass
@@ -8158,6 +8497,42 @@ async def caption_local_assets(payload: LocalAssetCaptionRequest):
             item["error"] = str(exc.detail or "反推失败")
         except Exception as exc:
             item["error"] = str(exc) or "反推失败"
+        items.append(item)
+    return {"ok": True, "count": ok_count, "items": items}
+
+@app.post("/api/local-assets/classify")
+async def classify_local_assets(payload: LocalAssetClassifyRequest):
+    items = []
+    ok_count = 0
+    for name in (payload.names or [])[:80]:
+        item = {"name": name, "ok": False, "classification": None, "classification_file": "", "error": ""}
+        try:
+            filename, path = _local_upload_safe_path(name)
+            if not os.path.isfile(path):
+                raise HTTPException(status_code=404, detail="文件不存在")
+            kind, _ = _local_upload_kind_ext(filename, "")
+            if kind != "image":
+                raise HTTPException(status_code=400, detail="仅支持图片素材智能分类")
+            classification = await classify_image_with_provider(
+                path,
+                payload.provider,
+                payload.model,
+                payload.ms_model,
+                payload.prompt,
+            )
+            _write_local_upload_classification(filename, classification)
+            item.update({
+                "ok": True,
+                "name": filename,
+                "classification": classification,
+                "classification_file": os.path.basename(_local_upload_classification_path(filename)),
+                "model": classification.get("model") or "",
+            })
+            ok_count += 1
+        except HTTPException as exc:
+            item["error"] = str(exc.detail or "智能分类失败")
+        except Exception as exc:
+            item["error"] = str(exc) or "智能分类失败"
         items.append(item)
     return {"ok": True, "count": ok_count, "items": items}
 
@@ -8228,7 +8603,7 @@ async def runninghub_submit(payload: RunningHubSubmitRequest):
     body = {
         "apiKey": api_key,
         "webappId": webapp_id,
-        "nodeInfoList": payload.nodeInfoList or [],
+        "nodeInfoList": sanitize_runninghub_node_info_list(payload.nodeInfoList or []),
     }
     instance_type = str(payload.instanceType or "").strip()
     if instance_type:
@@ -8262,11 +8637,11 @@ async def runninghub_workflow_submit(payload: RunningHubWorkflowSubmitRequest):
         "addMetadata": True,
     }
     if payload.nodeInfoList:
-        body["nodeInfoList"] = payload.nodeInfoList
+        body["nodeInfoList"] = sanitize_runninghub_node_info_list(payload.nodeInfoList)
     workflow_payload = payload.workflow
     if workflow_payload:
         if isinstance(workflow_payload, (dict, list)):
-            body["workflow"] = json.dumps(workflow_payload, ensure_ascii=False)
+            body["workflow"] = json.dumps(sanitize_seed_like_workflow_values(workflow_payload), ensure_ascii=False)
         else:
             body["workflow"] = str(workflow_payload)
     url = runninghub_endpoint_url(provider, "/task/openapi/create")
@@ -8331,7 +8706,7 @@ def list_runninghub_workflows():
                 continue
             provider_cfg = runninghub_provider_workflow_config(workflow_id)
             if provider_cfg:
-                merged[workflow_id] = runninghub_select_workflow_config(merged.get(workflow_id), provider_cfg)
+                merged[workflow_id] = runninghub_select_workflow_config(merged.get(workflow_id), provider_cfg, workflow_id)
     items = []
     for workflow_id, cfg in merged.items():
         if not isinstance(cfg, dict):
@@ -8355,7 +8730,7 @@ def get_runninghub_workflow(workflow_id: str):
         store = load_runninghub_workflow_store()
     cfg = store.get(key)
     provider_cfg = runninghub_provider_workflow_config(key)
-    cfg = runninghub_select_workflow_config(cfg, provider_cfg)
+    cfg = runninghub_select_workflow_config(cfg, provider_cfg, key)
     if not isinstance(cfg, dict):
         raise HTTPException(status_code=404, detail="RunningHub 工作流未找到")
     return {"workflow": cfg}
@@ -11124,6 +11499,10 @@ async def add_asset_library_item(payload: AssetLibraryAddRequest):
     if not src:
         raise HTTPException(status_code=400, detail="只支持保存本地 /assets 或 /output 媒体")
     _, item = make_asset_library_item(src, payload.name or os.path.basename(src), subdir=cat.get("dir") or "")
+    if item.get("kind") == "image":
+        classification = await classify_asset_image_best_effort(output_file_from_url(item.get("url") or "") or src)
+        if classification:
+            item["classification"] = classification
     cat.setdefault("items", []).append(item)
     save_asset_library(lib)
     return {"library": lib, "item": item}
@@ -11144,6 +11523,10 @@ async def batch_add_asset_library_items(payload: AssetLibraryBatchAddRequest):
         if not src:
             continue
         _, item = make_asset_library_item(src, entry.name or os.path.basename(src), subdir=cat.get("dir") or "")
+        if item.get("kind") == "image":
+            classification = await classify_asset_image_best_effort(output_file_from_url(item.get("url") or "") or src)
+            if classification:
+                item["classification"] = classification
         cat.setdefault("items", []).append(item)
         added.append(item)
     save_asset_library(lib)
@@ -11243,6 +11626,10 @@ async def import_shared_folder_files(payload: SharedFolderImport):
         if ext not in SHARED_MEDIA_EXTS:
             continue
         _, item = make_asset_library_item(abs_path, os.path.basename(abs_path), subdir=cat.get("dir") or "")
+        if item.get("kind") == "image":
+            classification = await classify_asset_image_best_effort(output_file_from_url(item.get("url") or "") or abs_path)
+            if classification:
+                item["classification"] = classification
         cat.setdefault("items", []).append(item)
         added.append(item)
     save_asset_library(lib)
@@ -11309,6 +11696,39 @@ def find_asset_item_in_library(lib, item_id, library_id=""):
                 if item.get("id") == item_id:
                     return item
     return None
+
+@app.post("/api/asset-library/items/classify")
+async def classify_asset_library_items(payload: AssetLibraryClassifyRequest):
+    lib = load_asset_library()
+    results = []
+    changed = False
+    for item_id in (payload.ids or [])[:80]:
+        item = find_asset_item_in_library(lib, item_id, payload.library_id)
+        result = {"id": item_id, "ok": False, "classification": None, "error": ""}
+        if not item:
+            result["error"] = "资产不存在"
+            results.append(result)
+            continue
+        if asset_library_media_kind(item.get("url") or "") != "image" and item.get("kind") != "image":
+            result["error"] = "仅支持图片素材智能分类"
+            results.append(result)
+            continue
+        path = output_file_from_url(item.get("url") or "")
+        if not path or not os.path.isfile(path):
+            result["error"] = "文件不存在"
+            results.append(result)
+            continue
+        try:
+            classification = await classify_image_with_provider(path, payload.provider, payload.model, payload.ms_model, payload.prompt)
+            item["classification"] = classification
+            changed = True
+            result.update({"ok": True, "classification": classification})
+        except Exception as exc:
+            result["error"] = str(getattr(exc, "detail", "") or exc)
+        results.append(result)
+    if changed:
+        save_asset_library(lib)
+    return {"library": lib, "count": sum(1 for item in results if item.get("ok")), "items": results}
 
 @app.post("/api/asset-library/items/{item_id}/register-avatar")
 async def register_asset_library_avatar(item_id: str, payload: AssetAvatarRegisterRequest):
@@ -12343,7 +12763,7 @@ def generate(req: GenerateRequest):
         with open(workflow_path, 'r', encoding='utf-8') as f:
             workflow = json.load(f)
 
-        seed = random.randint(1, 10**15)
+        seed = random.randint(1, 4294967295)
 
         if "23" in workflow and req.prompt:
             workflow["23"]["inputs"]["text"] = req.prompt
@@ -12360,7 +12780,7 @@ def generate(req: GenerateRequest):
         if "184" in workflow and "inputs" in workflow["184"] and "seed" in workflow["184"]["inputs"]:
             workflow["184"]["inputs"]["seed"] = seed
         if "172" in workflow and "inputs" in workflow["172"] and "seed" in workflow["172"]["inputs"]:
-            workflow["172"]["inputs"]["seed"] = seed % 4294967295
+            workflow["172"]["inputs"]["seed"] = seed
         if "14" in workflow and "inputs" in workflow["14"] and "seed" in workflow["14"]["inputs"]:
             workflow["14"]["inputs"]["seed"] = seed
 
@@ -12578,6 +12998,37 @@ def runninghub_workflow_config_has_payload(cfg):
         return False
     return bool(cfg.get("fields") or cfg.get("workflowJson") or cfg.get("raw"))
 
+def runninghub_static_workflow_entry(workflow_id: str):
+    key = runninghub_workflow_store_key(workflow_id)
+    if not key:
+        return None
+    static_provider = load_static_runninghub_provider()
+    for entry in (static_provider or {}).get("rh_workflows", []) or []:
+        if runninghub_workflow_store_key(entry.get("workflowId") or entry.get("id")) == key:
+            return entry
+    return None
+
+def runninghub_static_workflow_config(workflow_id: str):
+    entry = runninghub_static_workflow_entry(workflow_id)
+    if not isinstance(entry, dict):
+        return None
+    key = runninghub_workflow_store_key(entry.get("workflowId") or entry.get("id"))
+    cfg = {
+        "workflowId": key,
+        "title": entry.get("title") or key,
+        "description": entry.get("note") or entry.get("description") or "",
+        "fields": [
+            field for field in (runninghub_normalize_field(item) for item in (entry.get("fields") or []))
+            if not runninghub_is_saved_link_field(field)
+        ],
+        "workflowJson": entry.get("workflowJson") if isinstance(entry.get("workflowJson"), dict) else {},
+        "optionalImageMode": entry.get("optionalImageMode") or "prune-workflow",
+        "raw": entry.get("raw") if isinstance(entry.get("raw"), dict) else {},
+        "updatedAt": entry.get("updatedAt") or 0,
+        "source": "static_template",
+    }
+    return cfg if runninghub_workflow_config_has_payload(cfg) else None
+
 def runninghub_workflow_entry_from_config(cfg, fallback=None):
     fallback = fallback if isinstance(fallback, dict) else {}
     key = runninghub_workflow_store_key((cfg or {}).get("workflowId") or fallback.get("workflowId") or fallback.get("id"))
@@ -12621,7 +13072,7 @@ def runninghub_provider_with_workflow_store(provider):
         if not isinstance(cfg, dict) or not runninghub_workflow_config_has_payload(cfg):
             continue
         existing = by_id.get(workflow_id)
-        selected = runninghub_select_workflow_config(existing, cfg)
+        selected = runninghub_select_workflow_config(existing, cfg, workflow_id)
         entry = runninghub_workflow_entry_from_config(selected, existing)
         if not entry:
             continue
@@ -12661,7 +13112,10 @@ def runninghub_provider_workflow_config(workflow_id: str):
         return cfg if runninghub_workflow_config_has_payload(cfg) else None
     return None
 
-def runninghub_select_workflow_config(local_cfg, provider_cfg):
+def runninghub_select_workflow_config(local_cfg, provider_cfg, workflow_id: str = ""):
+    static_cfg = runninghub_static_workflow_config(workflow_id)
+    if static_cfg and (isinstance(local_cfg, dict) or isinstance(provider_cfg, dict)):
+        return static_cfg
     if isinstance(local_cfg, dict) and isinstance(provider_cfg, dict):
         try:
             local_updated = int(local_cfg.get("updatedAt") or 0)
